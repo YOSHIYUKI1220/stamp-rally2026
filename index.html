@@ -23,30 +23,51 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
   <!-- QRコード -->
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-  <!-- Firebase -->
-  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+
+  <!-- Firebase compat (通常scriptで読み込み・Babelの外で初期化) -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+  <script>
+    try {
+      const app = firebase.initializeApp({
+        apiKey:            "AIzaSyDlN3hEQXcY1Uo-JVpybOycmFF3C6--N-Y",
+        authDomain:        "stamp-rally2026.firebaseapp.com",
+        databaseURL:       "https://stamp-rally2026-default-rtdb.asia-southeast1.firebasedatabase.app",
+        projectId:         "stamp-rally2026",
+        storageBucket:     "stamp-rally2026.firebasestorage.app",
+        messagingSenderId: "362208550256",
+        appId:             "1:362208550256:web:d2cc3fbeb4204807c3c3b5",
+      });
+      window._db = firebase.database(app);
+      console.log("Firebase初期化成功");
+    } catch(e) {
+      console.error("Firebase初期化失敗:", e);
+      window._dbError = e.message;
+    }
+  </script>
 
   <script type="text/babel">
+
     const { useState, useEffect, useRef, useCallback } = React;
 
-// ==================== FIREBASE CONFIG ====================
-// ★ ここにFirebaseの設定を貼り付けてください ★
-const FIREBASE_CONFIG = {
-  apiKey:            "AIzaSyDlN3hEQXcY1Uo-JVpybOycmFF3C6--N-Y",
-  authDomain:        "stamp-rally2026.firebaseapp.com",
-  databaseURL:       "https://stamp-rally2026-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId:         "stamp-rally2026",
-  storageBucket:     "stamp-rally2026.firebasestorage.app",
-  messagingSenderId: "362208550256",
-  appId:             "1:362208550256:web:d2cc3fbeb4204807c3c3b5",
+// ==================== FIREBASE HELPERS ====================
+const fbRef    = (path) => window._db.ref(path);
+const fbSet    = (path, val) => window._db.ref(path).set(val);
+const fbGet    = (path) => window._db.ref(path).get().then(s => s.val());
+const fbOn     = (path, cb) => {
+  const r = window._db.ref(path);
+  r.on("value", s => cb(s.val()));
+  return () => r.off("value");
 };
+const fbTx     = (path, fn) => window._db.ref(path).transaction(fn);
+const fbPush   = (path, val) => window._db.ref(path).push(val);
+const fbRemove = (path) => window._db.ref(path).remove();
 
-firebase.initializeApp(FIREBASE_CONFIG);
-const db = firebase.database();
+
 
 // ==================== CONFIG ====================
 const ADMIN_PASSWORD = "admin2024";
@@ -93,11 +114,6 @@ const lsSet = (key, val) => {
   try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
 };
 
-// ==================== FIREBASE HELPERS ====================
-const fbSet  = (path, val) => db.ref(path).set(val);
-const fbGet  = (path) => db.ref(path).get().then(s => s.val());
-const fbOn   = (path, cb) => { const ref = db.ref(path); ref.on("value", s => cb(s.val())); return () => ref.off(); };
-const fbTx   = (path, fn) => db.ref(path).transaction(fn); // アトミック更新（景品在庫など）
 
 // ==================== LOADING SCREEN ====================
 function LoadingScreen({ error }) {
@@ -151,7 +167,7 @@ function StampRallyApp() {
   // ── Firebase: 共有データをリアルタイム購読 ──
   useEffect(() => {
     // Firebase接続テスト
-    const connRef = firebase.database().ref(".info/connected");
+    const connRef = window._db.ref(".info/connected");
     const timeout = setTimeout(() => {
       setFbError("Firebaseに接続できませんでした。\nFirebaseの設定値（FIREBASE_CONFIG）を確認してください。");
       setLoading(false);
@@ -252,7 +268,7 @@ function StampRallyApp() {
     if (claimed || !userPrize) return;
     setClaimed(true);
     const claim = { userId, prize: userPrize, claimedAt: Date.now() };
-    db.ref("claims").push(claim);
+    window._db.ref("claims").push(claim);
     fbSet("visitors/" + userId + "/claimed", true);
   };
 
@@ -321,11 +337,11 @@ function VisitorsTab({ booths }) {
   }, []);
 
   const deleteOne = (uid) => {
-    db.ref("visitors/" + uid).remove();
+    window._db.ref("visitors/" + uid).remove();
   };
   const deleteAll = () => {
-    db.ref("visitors").remove();
-    db.ref("claims").remove();
+    window._db.ref("visitors").remove();
+    window._db.ref("claims").remove();
     setConfirmAll(false);
   };
 
@@ -1768,7 +1784,7 @@ function SettingsTab({ eventName, setEventName }) {
   const resetMyData = () => {
     // Firebaseから自分の来場者データも削除
     const uid = localStorage.getItem("sr_uid");
-    if (uid) db.ref("visitors/" + uid).remove();
+    if (uid) window._db.ref("visitors/" + uid).remove();
     localStorage.removeItem("sr_stamps");
     localStorage.removeItem("sr_prize");
     localStorage.removeItem("sr_claimed");
@@ -2630,7 +2646,7 @@ document.head.appendChild(styleEl);
 function StaffPage({ onBack }) {
   const [claims, setClaims] = useState([]);
   useEffect(() => {
-    const ref = db.ref("claims");
+    const ref = window._db.ref("claims");
     ref.on("value", s => {
       const val = s.val();
       if (!val) { setClaims([]); return; }
@@ -2673,6 +2689,10 @@ function StaffPage({ onBack }) {
 }
 
     // アプリをマウント
+    const container = document.getElementById('root');
+    const root = ReactDOM.createRoot(container);
+    root.render(React.createElement(StampRallyApp));
+  
     const container = document.getElementById('root');
     const root = ReactDOM.createRoot(container);
     root.render(React.createElement(StampRallyApp));
