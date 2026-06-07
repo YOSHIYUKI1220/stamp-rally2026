@@ -1,0 +1,2234 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+// ==================== CONFIG ====================
+const ADMIN_PASSWORD = "admin2024";
+
+const DEFAULT_BOOTHS = [
+  { id: "booth_01", name: "模擬店A", description: "たこ焼き・焼きそば", icon: "🍡", color: "#FF6B6B" },
+  { id: "booth_02", name: "模擬店B", description: "クレープ・ジュース", icon: "🍦", color: "#FF8E53" },
+  { id: "booth_03", name: "展示室1", description: "美術部・写真部展示", icon: "🎨", color: "#FFC107" },
+  { id: "booth_04", name: "展示室2", description: "科学部・工作展示", icon: "🔬", color: "#4CAF50" },
+  { id: "booth_05", name: "体育館", description: "ダンス・バンド演奏", icon: "🎵", color: "#00BCD4" },
+  { id: "booth_06", name: "図書室", description: "謎解き・クイズ", icon: "📚", color: "#3F51B5" },
+  { id: "booth_07", name: "理科室", description: "実験ショー", icon: "⚗️", color: "#9C27B0" },
+  { id: "booth_08", name: "校庭ステージ", description: "野外パフォーマンス", icon: "🎭", color: "#E91E63" },
+  { id: "booth_09", name: "購買部", description: "限定グッズ販売", icon: "🛍️", color: "#FF5722" },
+  { id: "booth_10", name: "インフォメーション", description: "総合案内・休憩所", icon: "ℹ️", color: "#607D8B" },
+];
+
+const DEFAULT_PRIZES = [
+  { id: "p1", name: "チョコレートセット", icon: "🍫", stock: 50 },
+  { id: "p2", name: "キャンディーBOX", icon: "🍬", stock: 50 },
+  { id: "p3", name: "ポップコーン", icon: "🍿", stock: 30 },
+  { id: "p4", name: "クッキー缶", icon: "🍪", stock: 30 },
+  { id: "p5", name: "オリジナルステッカー", icon: "⭐", stock: 100 },
+  { id: "p6", name: "オリジナルバッジ", icon: "📛", stock: 80 },
+  { id: "p7", name: "メモ帳セット", icon: "📓", stock: 40 },
+  { id: "p8", name: "えんぴつセット", icon: "✏️", stock: 60 },
+  { id: "p9", name: "ミニタオル", icon: "🎀", stock: 30 },
+  { id: "p10", name: "特製クリアファイル", icon: "📂", stock: 70 },
+];
+
+// ==================== STORAGE UTILS ====================
+const STORAGE_KEYS = {
+  USER_STAMPS: "sr_user_stamps",
+  USER_PRIZE: "sr_user_prize",
+  USER_CLAIMED: "sr_user_claimed",
+  BOOTHS: "sr_booths",
+  PRIZES: "sr_prizes",
+  VISITORS: "sr_visitors",
+  PRIZE_CLAIMS: "sr_prize_claims",
+};
+
+const storage = {
+  get: (key, fallback = null) => {
+    try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+  },
+  set: (key, value) => {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  },
+};
+
+function getUserId() {
+  let id = localStorage.getItem("sr_uid");
+  if (!id) {
+    id = "u_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+    localStorage.setItem("sr_uid", id);
+  }
+  return id;
+}
+
+// ==================== QR SCANNER (jsQR via CDN) ====================
+function detectCameraErrorType(e) {
+  const name = e?.name || "";
+  const msg  = (e?.message || "").toLowerCase();
+  if (name === "NotAllowedError"  || msg.includes("permission") || msg.includes("denied"))
+    return "denied";
+  if (name === "NotFoundError"    || msg.includes("not found") || msg.includes("no device"))
+    return "notFound";
+  if (name === "NotSupportedError"|| msg.includes("secure")    || msg.includes("https"))
+    return "notHttps";
+  if (name === "NotReadableError" || msg.includes("in use")    || msg.includes("allocated"))
+    return "inUse";
+  return "unknown";
+}
+
+function useQRScanner(onScan) {
+  const videoRef  = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const rafRef    = useRef(null);
+  const [error,     setError]     = useState(null);   // null | errorType string
+  const [active,    setActive]    = useState(false);
+  const [permState, setPermState] = useState(null);   // "granted"|"denied"|"prompt"|null
+
+  // 許可状態をポーリングで監視（設定変更後に自動リトライ）
+  useEffect(() => {
+    if (!navigator.permissions) return;
+    let timer;
+    navigator.permissions.query({ name: "camera" }).then(status => {
+      setPermState(status.state);
+      status.onchange = () => {
+        setPermState(status.state);
+        if (status.state === "granted") { setError(null); }
+      };
+    }).catch(() => {});
+    return () => clearTimeout(timer);
+  }, []);
+
+  const stop = useCallback(() => {
+    cancelAnimationFrame(rafRef.current);
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+    setActive(false);
+  }, []);
+
+  const start = useCallback(async () => {
+    setError(null);
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError("notHttps"); return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" }
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play();
+      }
+      setActive(true);
+      setError(null);
+
+      const tick = () => {
+        if (!videoRef.current || !canvasRef.current) return;
+        const video  = videoRef.current;
+        const canvas = canvasRef.current;
+        if (video.readyState === video.HAVE_ENOUGH_DATA) {
+          canvas.height = video.videoHeight;
+          canvas.width  = video.videoWidth;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          if (window.jsQR) {
+            const code = window.jsQR(imageData.data, imageData.width, imageData.height, {
+              inversionAttempts: "dontInvert",
+            });
+            if (code) { onScan(code.data); return; }
+          }
+        }
+        rafRef.current = requestAnimationFrame(tick);
+      };
+      rafRef.current = requestAnimationFrame(tick);
+    } catch (e) {
+      setError(detectCameraErrorType(e));
+    }
+  }, [onScan]);
+
+  useEffect(() => () => stop(), [stop]);
+
+  return { videoRef, canvasRef, start, stop, active, error, permState };
+}
+
+// ==================== CAMERA PERMISSION GUIDE ====================
+function detectDevice() {
+  const ua = navigator.userAgent;
+  if (/iPhone|iPad/.test(ua))           return "ios";
+  if (/Android/.test(ua))               return "android";
+  return "pc";
+}
+
+const CAMERA_GUIDES = {
+  denied: {
+    ios: {
+      icon: "🍎",
+      title: "iPhoneのカメラ許可を設定",
+      color: "#667eea",
+      steps: [
+        { icon: "1", text: "このブラウザを一度閉じます" },
+        { icon: "2", text: "iPhoneの「設定」アプリを開きます" },
+        { icon: "3", text: "下にスクロールして「Safari」をタップ" },
+        { icon: "4", text: "「カメラ」をタップ →「許可」を選択" },
+        { icon: "5", text: "Safariに戻り、このページを再読み込み" },
+        { icon: "6", text: "「QRスキャン」ボタンを再度タップ →「許可」" },
+      ],
+      note: "※ Safari以外のブラウザ（Chrome等）はiPhoneではカメラが使えません"
+    },
+    android: {
+      icon: "🤖",
+      title: "Androidのカメラ許可を設定",
+      color: "#22c55e",
+      steps: [
+        { icon: "1", text: "ブラウザのアドレスバー左端のアイコン（🔒 や ℹ）をタップ" },
+        { icon: "2", text: "「権限」または「サイトの設定」をタップ" },
+        { icon: "3", text: "「カメラ」を「許可」に変更" },
+        { icon: "4", text: "ページを再読み込み（↻ ボタン）" },
+        { icon: "5", text: "「QRスキャン」ボタンを再度タップ" },
+      ],
+      note: "※ 設定後にページの再読み込みが必要です"
+    },
+    pc: {
+      icon: "💻",
+      title: "PCのカメラ許可を設定",
+      color: "#f59e0b",
+      steps: [
+        { icon: "1", text: "アドレスバー右端のカメラアイコン（📷 または 🔒）をクリック" },
+        { icon: "2", text: "「カメラを常に許可する」を選択" },
+        { icon: "3", text: "ページを再読み込み（F5 キー）" },
+        { icon: "4", text: "「QRスキャン」ボタンを再度クリック" },
+      ],
+      note: "※ アドレスバーにアイコンが出ない場合はChrome設定→プライバシー→サイトの設定→カメラ から許可"
+    },
+  },
+  notFound: {
+    ios:     { icon: "📷", title: "カメラが見つかりません", color: "#ef4444", steps: [{ icon: "!", text: "このデバイスにカメラが接続されていないか、他のアプリが使用中です" }, { icon: "1", text: "カメラを使用している他のアプリを閉じてください" }, { icon: "2", text: "ページを再読み込みして再試行してください" }], note: "" },
+    android: { icon: "📷", title: "カメラが見つかりません", color: "#ef4444", steps: [{ icon: "!", text: "このデバイスにカメラが接続されていないか、他のアプリが使用中です" }, { icon: "1", text: "カメラアプリや他のアプリを閉じてください" }, { icon: "2", text: "ページを再読み込みして再試行してください" }], note: "" },
+    pc:      { icon: "📷", title: "カメラが見つかりません",  color: "#ef4444", steps: [{ icon: "!", text: "PCにカメラが接続されていないか、ドライバが認識されていません" }, { icon: "1", text: "外付けカメラの場合はUSB接続を確認してください" }, { icon: "2", text: "ZoomやTeamsなど他のアプリを閉じてください" }, { icon: "3", text: "ページを再読み込みして再試行してください" }], note: "" },
+  },
+  notHttps: {
+    ios:     { icon: "🔒", title: "HTTPS接続が必要です", color: "#f59e0b", steps: [{ icon: "!", text: "カメラはHTTPS接続でのみ使用できます" }, { icon: "1", text: "URLが「https://」から始まっているか確認してください" }, { icon: "2", text: "http:// の場合はhttpsに変更してアクセスし直してください" }], note: "※ GitHub Pagesは自動でHTTPS対応です" },
+    android: { icon: "🔒", title: "HTTPS接続が必要です", color: "#f59e0b", steps: [{ icon: "!", text: "カメラはHTTPS接続でのみ使用できます" }, { icon: "1", text: "URLが「https://」から始まっているか確認してください" }], note: "※ GitHub Pagesは自動でHTTPS対応です" },
+    pc:      { icon: "🔒", title: "HTTPS接続が必要です", color: "#f59e0b", steps: [{ icon: "!", text: "カメラはHTTPS接続でのみ使用できます" }, { icon: "1", text: "URLが「https://」から始まっているか確認してください" }], note: "※ GitHub Pagesは自動でHTTPS対応です" },
+  },
+  inUse: {
+    ios:     { icon: "⚠️", title: "カメラが使用中です", color: "#f59e0b", steps: [{ icon: "1", text: "カメラを使っている他のアプリを閉じてください" }, { icon: "2", text: "このブラウザのタブも他のカメラページを閉じてください" }, { icon: "3", text: "ページを再読み込みして再試行してください" }], note: "" },
+    android: { icon: "⚠️", title: "カメラが使用中です", color: "#f59e0b", steps: [{ icon: "1", text: "カメラを使っている他のアプリを閉じてください" }, { icon: "2", text: "ページを再読み込みして再試行してください" }], note: "" },
+    pc:      { icon: "⚠️", title: "カメラが使用中です", color: "#f59e0b", steps: [{ icon: "1", text: "ZoomやTeamsなどカメラを使っている他のアプリを閉じてください" }, { icon: "2", text: "ページを再読み込みして再試行してください" }], note: "" },
+  },
+  unknown: {
+    ios:     { icon: "❓", title: "カメラを起動できませんでした", color: "#6b7280", steps: [{ icon: "1", text: "Safariを使用しているか確認してください（必須）" }, { icon: "2", text: "設定→Safari→カメラ→「許可」に設定されているか確認" }, { icon: "3", text: "本体を再起動して再試行してください" }], note: "※ iPhoneはSafariのみカメラQRスキャンに対応" },
+    android: { icon: "❓", title: "カメラを起動できませんでした", color: "#6b7280", steps: [{ icon: "1", text: "Chrome最新版を使用しているか確認してください" }, { icon: "2", text: "スマホを再起動して再試行してください" }], note: "" },
+    pc:      { icon: "❓", title: "カメラを起動できませんでした", color: "#6b7280", steps: [{ icon: "1", text: "Chrome または Edge の最新版を使用してください" }, { icon: "2", text: "PCを再起動して再試行してください" }], note: "" },
+  },
+};
+
+function CameraPermissionGuide({ errorType, onRetry }) {
+  const device = detectDevice();
+  const guide  = (CAMERA_GUIDES[errorType] || CAMERA_GUIDES.unknown)[device];
+
+  return (
+    <div style={camStyles.overlay}>
+      {/* ヘッダー */}
+      <div style={{ ...camStyles.headerBar, background: guide.color }}>
+        <span style={{ fontSize: 28 }}>{guide.icon}</span>
+        <span style={camStyles.headerTitle}>{guide.title}</span>
+      </div>
+
+      {/* デバイスバッジ */}
+      <div style={camStyles.deviceBadge}>
+        {device === "ios" ? "📱 iPhone / iPad" : device === "android" ? "📱 Android" : "💻 PC / Mac"}
+        <span style={camStyles.browserHint}>
+          {device === "ios" ? "　Safari を使用してください" : device === "android" ? "　Chrome 推奨" : "　Chrome / Edge 推奨"}
+        </span>
+      </div>
+
+      {/* 手順 */}
+      <div style={camStyles.stepsWrap}>
+        {guide.steps.map((s, i) => (
+          <div key={i} style={camStyles.stepRow}>
+            <div style={{ ...camStyles.stepBadge, background: s.icon === "!" ? "#ef4444" : guide.color }}>
+              {s.icon}
+            </div>
+            <p style={camStyles.stepText}>{s.text}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* 注記 */}
+      {guide.note && (
+        <div style={camStyles.noteBox}>
+          <span style={{ fontSize: 14 }}>ℹ️ </span>{guide.note}
+        </div>
+      )}
+
+      {/* アクションボタン */}
+      <div style={camStyles.btnArea}>
+        <button style={camStyles.retryBtn} onClick={onRetry}>
+          🔄　再試行する
+        </button>
+        <button style={camStyles.reloadBtn} onClick={() => window.location.reload()}>
+          ↻　ページを再読み込み
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const camStyles = {
+  overlay: {
+    display: "flex",
+    flexDirection: "column",
+    background: "rgba(15,12,41,0.97)",
+    borderRadius: 20,
+    overflow: "hidden",
+    margin: "0 16px",
+    border: "1px solid rgba(255,255,255,0.1)",
+  },
+  headerBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    padding: "16px 20px",
+  },
+  headerTitle: {
+    color: "#fff",
+    fontWeight: 800,
+    fontSize: 16,
+  },
+  deviceBadge: {
+    background: "rgba(255,255,255,0.05)",
+    padding: "10px 20px",
+    color: "rgba(255,255,255,0.7)",
+    fontSize: 13,
+    fontWeight: 600,
+    display: "flex",
+    alignItems: "center",
+    borderBottom: "1px solid rgba(255,255,255,0.08)",
+  },
+  browserHint: {
+    color: "rgba(255,255,255,0.35)",
+    fontSize: 12,
+    fontWeight: 400,
+  },
+  stepsWrap: {
+    padding: "16px 20px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 12,
+  },
+  stepRow: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  stepBadge: {
+    minWidth: 28,
+    height: 28,
+    borderRadius: 8,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    color: "#fff",
+    fontWeight: 800,
+    fontSize: 13,
+    flexShrink: 0,
+    marginTop: 1,
+  },
+  stepText: {
+    margin: 0,
+    color: "rgba(255,255,255,0.85)",
+    fontSize: 14,
+    lineHeight: 1.6,
+  },
+  noteBox: {
+    margin: "0 20px 12px",
+    background: "rgba(255,255,255,0.05)",
+    border: "1px solid rgba(255,255,255,0.1)",
+    borderRadius: 10,
+    padding: "10px 14px",
+    color: "rgba(255,255,255,0.5)",
+    fontSize: 12,
+    lineHeight: 1.6,
+  },
+  btnArea: {
+    padding: "12px 20px 20px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  },
+  retryBtn: {
+    padding: "14px",
+    background: "linear-gradient(135deg,#667eea,#764ba2)",
+    border: "none",
+    borderRadius: 14,
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: 700,
+    cursor: "pointer",
+    letterSpacing: 0.5,
+  },
+  reloadBtn: {
+    padding: "12px",
+    background: "rgba(255,255,255,0.07)",
+    border: "1px solid rgba(255,255,255,0.15)",
+    borderRadius: 14,
+    color: "rgba(255,255,255,0.7)",
+    fontSize: 14,
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+};
+
+// ==================== MAIN APP ====================
+export default function StampRallyApp() {
+  const [page, setPage] = useState("home"); // home | scan | list | complete | admin | staff
+  const [booths, setBooths] = useState(() => storage.get(STORAGE_KEYS.BOOTHS, DEFAULT_BOOTHS));
+  const [prizes, setPrizes] = useState(() => storage.get(STORAGE_KEYS.PRIZES, DEFAULT_PRIZES));
+  const [stamps, setStamps] = useState(() => storage.get(STORAGE_KEYS.USER_STAMPS, []));
+  const [userPrize, setUserPrize] = useState(() => storage.get(STORAGE_KEYS.USER_PRIZE, null));
+  const [claimed, setClaimed] = useState(() => storage.get(STORAGE_KEYS.USER_CLAIMED, false));
+  const [toast, setToast] = useState(null);
+  const [adminMode, setAdminMode] = useState(false);
+  const [newlyStamped, setNewlyStamped] = useState(null);
+  const userId = useRef(getUserId()).current;
+
+  // Persist
+  useEffect(() => { storage.set(STORAGE_KEYS.BOOTHS, booths); }, [booths]);
+  useEffect(() => { storage.set(STORAGE_KEYS.PRIZES, prizes); }, [prizes]);
+  useEffect(() => { storage.set(STORAGE_KEYS.USER_STAMPS, stamps); }, [stamps]);
+  useEffect(() => { storage.set(STORAGE_KEYS.USER_PRIZE, userPrize); }, [userPrize]);
+  useEffect(() => { storage.set(STORAGE_KEYS.USER_CLAIMED, claimed); }, [claimed]);
+
+  // Load jsQR
+  useEffect(() => {
+    if (!window.jsQR) {
+      const s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js";
+      document.head.appendChild(s);
+    }
+  }, []);
+
+  const showToast = (msg, type = "success") => {
+    setToast({ msg, type });
+    setTimeout(() => setToast(null), 2800);
+  };
+
+  const handleStamp = (boothId) => {
+    if (stamps.includes(boothId)) {
+      showToast("このスタンプはすでに押されています", "warn");
+      return false;
+    }
+    const booth = booths.find(b => b.id === boothId);
+    if (!booth) {
+      showToast("無効なQRコードです", "error");
+      return false;
+    }
+    const newStamps = [...stamps, boothId];
+    setStamps(newStamps);
+
+    // Track visitor
+    const visitors = storage.get(STORAGE_KEYS.VISITORS, {});
+    if (!visitors[userId]) visitors[userId] = { stamps: [], startedAt: Date.now() };
+    visitors[userId].stamps = newStamps;
+    storage.set(STORAGE_KEYS.VISITORS, visitors);
+
+    showToast(`「${booth.name}」のスタンプをゲット！`, "success");
+
+    // スタンプカードへ遷移してアニメーション表示
+    setNewlyStamped(boothId);
+    setPage("list");
+    setTimeout(() => setNewlyStamped(null), 1200);
+
+    if (newStamps.length === booths.length && !userPrize) {
+      setTimeout(() => setPage("complete"), 1600);
+    }
+    return true;
+  };
+
+  const handleComplete = () => {
+    if (userPrize) return;
+    const available = prizes.filter(p => p.stock > 0);
+    if (available.length === 0) { showToast("景品がなくなりました", "error"); return; }
+    const prize = available[Math.floor(Math.random() * available.length)];
+    setUserPrize(prize);
+    const updated = prizes.map(p => p.id === prize.id ? { ...p, stock: p.stock - 1 } : p);
+    setPrizes(updated);
+  };
+
+  const handleClaim = () => {
+    if (claimed || !userPrize) return;
+    setClaimed(true);
+    // Record claim
+    const claims = storage.get(STORAGE_KEYS.PRIZE_CLAIMS, []);
+    claims.push({ userId, prize: userPrize, claimedAt: Date.now() });
+    storage.set(STORAGE_KEYS.PRIZE_CLAIMS, claims);
+    const visitors = storage.get(STORAGE_KEYS.VISITORS, {});
+    if (visitors[userId]) visitors[userId].claimed = true;
+    storage.set(STORAGE_KEYS.VISITORS, visitors);
+  };
+
+  const completed = stamps.length === booths.length;
+  const progress = booths.length > 0 ? stamps.length / booths.length : 0;
+
+  return (
+    <div style={styles.app}>
+      {/* Toast */}
+      {toast && (
+        <div style={{ ...styles.toast, ...(toast.type === "warn" ? styles.toastWarn : toast.type === "error" ? styles.toastError : {}) }}>
+          {toast.type === "success" ? "✓ " : toast.type === "warn" ? "⚠ " : "✗ "}{toast.msg}
+        </div>
+      )}
+
+      {/* Pages */}
+      {page === "home" && (
+        <HomePage
+          booths={booths} stamps={stamps} progress={progress} completed={completed}
+          onScan={() => setPage("scan")} onList={() => setPage("list")}
+          onComplete={() => setPage("complete")} onAdmin={() => setPage("admin")}
+          userPrize={userPrize} claimed={claimed} newlyStamped={newlyStamped}
+        />
+      )}
+      {page === "scan" && (
+        <ScanPage
+          booths={booths} stamps={stamps}
+          onScan={handleStamp} onBack={() => setPage("home")}
+        />
+      )}
+      {page === "list" && (
+        <ListPage booths={booths} stamps={stamps} onBack={() => setPage("home")} newlyStamped={newlyStamped} />
+      )}
+      {page === "complete" && (
+        <CompletePage
+          userPrize={userPrize} claimed={claimed}
+          onGetPrize={handleComplete} onClaim={handleClaim}
+          onBack={() => setPage("home")}
+        />
+      )}
+      {page === "admin" && (
+        <AdminPage
+          booths={booths} setBooths={setBooths}
+          prizes={prizes} setPrizes={setPrizes}
+          onBack={() => setPage("home")}
+          onStaff={() => setPage("staff")}
+        />
+      )}
+      {page === "staff" && (
+        <StaffPage onBack={() => setPage("admin")} prizes={prizes} />
+      )}
+    </div>
+  );
+}
+
+// ==================== HOME PAGE ====================
+function HomePage({ booths, stamps, progress, completed, onScan, onList, onComplete, onAdmin, userPrize, claimed, newlyStamped }) {
+  const pct  = Math.round(progress * 100);
+  const got  = stamps.length;
+  const total = booths.length;
+  const cols  = total <= 6 ? 2 : total <= 12 ? 3 : 4;
+
+  return (
+    <div style={{ ...styles.page, overflowY: "auto" }}>
+      {/* ── ヘッダー（コンパクト） ── */}
+      <div style={homeStyles.header}>
+        <div style={homeStyles.headerLeft}>
+          <div style={styles.festivalBadge}>🎪 学園祭2024</div>
+          <h1 style={homeStyles.title}>スタンプラリー</h1>
+        </div>
+        {/* ミニ進捗リング */}
+        <MiniRing pct={pct} got={got} total={total} completed={completed} />
+      </div>
+
+      {/* ── ステータスバー ── */}
+      <div style={homeStyles.statusBar}>
+        {claimed ? (
+          <div style={homeStyles.statusRow}>
+            <span>🎉</span>
+            <span style={homeStyles.statusText}>景品受け取り済み　ご参加ありがとうございました！</span>
+          </div>
+        ) : completed ? (
+          <div style={homeStyles.statusRow}>
+            <span>✨</span>
+            <span style={{ ...homeStyles.statusText, color: "#f093fb", fontWeight: 700 }}>コンプリート！景品ページへ進んでください</span>
+          </div>
+        ) : (
+          <div style={{ width: "100%" }}>
+            <div style={homeStyles.progressTrack}>
+              <div style={{ ...homeStyles.progressFill, width: `${pct}%` }} />
+            </div>
+            <div style={homeStyles.statusText}>あと {total - got} 箇所でコンプリート！</div>
+          </div>
+        )}
+      </div>
+
+      {/* ── スタンプカード（インライン） ── */}
+      <div style={stampCardStyles.card}>
+        <div style={stampCardStyles.cardHeader}>
+          <span style={{ fontSize: 14 }}>🎪</span>
+          <span style={stampCardStyles.cardTitle}>スタンプカード</span>
+          <span style={{ ...styles.countBadge, fontSize: 12, padding: "2px 10px" }}>{got}/{total}</span>
+        </div>
+        <div style={{ ...stampCardStyles.grid, gridTemplateColumns: `repeat(${cols}, 1fr)` }}>
+          {booths.map((booth, i) => (
+            <StampCell
+              key={booth.id}
+              booth={booth}
+              done={stamps.includes(booth.id)}
+              index={i}
+              newlyStamped={newlyStamped}
+            />
+          ))}
+        </div>
+        <div style={stampCardStyles.cardFooter}>
+          {completed
+            ? <div style={stampCardStyles.completeMsg}>✨ 全スタンプ制覇！景品交換へ進んでください ✨</div>
+            : <div style={stampCardStyles.footerMsg}>QRコードをスキャンしてスタンプを集めよう！</div>
+          }
+        </div>
+      </div>
+
+      {/* ── アクションボタン ── */}
+      <div style={{ ...styles.actions, marginTop: 12 }}>
+        {claimed ? null : completed ? (
+          <button style={{ ...styles.btnPrimary, background: "linear-gradient(135deg,#f093fb,#f5576c)" }} onClick={onComplete}>
+            <span style={{ fontSize: 22 }}>🎁</span>
+            <span>景品をもらう！</span>
+          </button>
+        ) : (
+          <button style={styles.btnPrimary} onClick={onScan}>
+            <span style={{ fontSize: 22 }}>📷</span>
+            <span>QRコードをスキャン</span>
+          </button>
+        )}
+        {claimed && (
+          <div style={{ textAlign: "center", color: "rgba(255,255,255,0.4)", fontSize: 13, padding: "8px 0" }}>
+            🎉 ご参加ありがとうございました！
+          </div>
+        )}
+      </div>
+
+      <button style={styles.adminLink} onClick={onAdmin}>⚙ 管理者</button>
+    </div>
+  );
+}
+
+// ── コンパクト進捗リング ──
+function MiniRing({ pct, got, total, completed }) {
+  const r = 26, cx = 32, cy = 32;
+  const circ   = 2 * Math.PI * r;
+  const offset = circ - (pct / 100) * circ;
+  return (
+    <div style={homeStyles.miniRingWrap}>
+      <svg width="64" height="64">
+        <defs>
+          <linearGradient id="miniGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor={completed ? "#f093fb" : "#667eea"} />
+            <stop offset="100%" stopColor={completed ? "#f5576c" : "#764ba2"} />
+          </linearGradient>
+        </defs>
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="5" />
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke="url(#miniGrad)" strokeWidth="5"
+          strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
+          style={{ transform:"rotate(-90deg)", transformOrigin:`${cx}px ${cy}px`, transition:"stroke-dashoffset 0.6s ease" }}
+        />
+      </svg>
+      <div style={homeStyles.miniRingInner}>
+        <span style={homeStyles.miniRingNum}>{got}</span>
+        <span style={homeStyles.miniRingOf}>/{total}</span>
+      </div>
+    </div>
+  );
+}
+
+const homeStyles = {
+  header: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "44px 20px 10px",
+  },
+  headerLeft: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+  },
+  title: {
+    fontSize: 28,
+    fontWeight: 900,
+    margin: 0,
+    background: "linear-gradient(135deg,#fff 0%,#c0c0ff 100%)",
+    WebkitBackgroundClip: "text",
+    WebkitTextFillColor: "transparent",
+    letterSpacing: -0.5,
+  },
+  miniRingWrap: {
+    position: "relative",
+    width: 64,
+    height: 64,
+    flexShrink: 0,
+  },
+  miniRingInner: {
+    position: "absolute",
+    inset: 0,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 1,
+  },
+  miniRingNum: {
+    fontSize: 18,
+    fontWeight: 900,
+    color: "#fff",
+    lineHeight: 1,
+  },
+  miniRingOf: {
+    fontSize: 11,
+    color: "rgba(255,255,255,0.5)",
+    lineHeight: 1,
+    marginTop: 4,
+  },
+  statusBar: {
+    margin: "0 14px 10px",
+    padding: "10px 14px",
+    background: "rgba(255,255,255,0.05)",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.08)",
+    display: "flex",
+    alignItems: "center",
+  },
+  statusRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    width: "100%",
+  },
+  statusText: {
+    color: "rgba(255,255,255,0.6)",
+    fontSize: 13,
+  },
+  progressTrack: {
+    height: 6,
+    background: "rgba(255,255,255,0.1)",
+    borderRadius: 3,
+    overflow: "hidden",
+    marginBottom: 6,
+  },
+  progressFill: {
+    height: "100%",
+    background: "linear-gradient(90deg,#667eea,#f093fb)",
+    borderRadius: 3,
+    transition: "width 0.6s ease",
+  },
+};
+
+// ==================== PROGRESS RING ====================
+function ProgressRing({ pct, stamps, total, completed }) {
+  const r = 70, cx = 90, cy = 90;
+  const circumference = 2 * Math.PI * r;
+  const offset = circumference - (pct / 100) * circumference;
+
+  return (
+    <div style={styles.ringWrapper}>
+      <svg width="180" height="180" style={{ overflow: "visible" }}>
+        <defs>
+          <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor={completed ? "#f093fb" : "#667eea"} />
+            <stop offset="100%" stopColor={completed ? "#f5576c" : "#764ba2"} />
+          </linearGradient>
+        </defs>
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="10" />
+        <circle
+          cx={cx} cy={cy} r={r} fill="none"
+          stroke="url(#ringGrad)" strokeWidth="10"
+          strokeDasharray={circumference} strokeDashoffset={offset}
+          strokeLinecap="round"
+          style={{ transform: "rotate(-90deg)", transformOrigin: `${cx}px ${cy}px`, transition: "stroke-dashoffset 0.6s ease" }}
+        />
+      </svg>
+      <div style={styles.ringInner}>
+        <div style={styles.ringNum}>{stamps}</div>
+        <div style={styles.ringOf}>/ {total}</div>
+        <div style={styles.ringLabel}>{completed ? "完了！" : "スタンプ"}</div>
+      </div>
+    </div>
+  );
+}
+
+// ==================== SCAN PAGE ====================
+function ScanPage({ booths, stamps, onScan, onBack }) {
+  const [manualId, setManualId] = useState("");
+  const scanned = useRef(false);
+
+  const handleScan = useCallback((data) => {
+    if (scanned.current) return;
+    const match = data.match(/^STAMP_RALLY:(.+)$/);
+    if (!match) return;
+    scanned.current = true;
+    onScan(match[1]);
+    setTimeout(() => { scanned.current = false; }, 2000);
+  }, [onScan]);
+
+  const { videoRef, canvasRef, start, stop, active, error } = useQRScanner(handleScan);
+
+  useEffect(() => { start(); return () => stop(); }, []);
+
+  const handleManual = () => {
+    if (manualId.trim()) { onScan(manualId.trim()); setManualId(""); }
+  };
+  const handleRetry = () => { stop(); setTimeout(() => start(), 300); };
+
+  return (
+    <div style={styles.page}>
+      <div style={styles.pageHeader}>
+        <button style={styles.backBtn} onClick={() => { stop(); onBack(); }}>← 戻る</button>
+        <h2 style={styles.pageTitle}>QRスキャン</h2>
+        <div />
+      </div>
+
+      {error ? (
+        /* カメラ許可ガイド */
+        <div style={{ flex: 1, overflowY: "auto", paddingBottom: 24 }}>
+          <CameraPermissionGuide errorType={error} onRetry={handleRetry} />
+          <div style={{ ...styles.manualSection, marginTop: 20 }}>
+            <p style={{ color: "rgba(255,255,255,0.35)", fontSize: 11, textAlign: "center", marginBottom: 8 }}>
+              ─ カメラが使えない場合は手動入力 ─
+            </p>
+            <div style={styles.manualRow}>
+              <select value={manualId} onChange={e => setManualId(e.target.value)} style={styles.manualSelect}>
+                <option value="">ブースを選択...</option>
+                {booths.map(b => (
+                  <option key={b.id} value={b.id} disabled={stamps.includes(b.id)}>
+                    {b.icon} {b.name}{stamps.includes(b.id) ? " ✓" : ""}
+                  </option>
+                ))}
+              </select>
+              <button style={styles.manualBtn} onClick={handleManual}>取得</button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        /* 通常スキャン画面 */
+        <>
+          <div style={styles.scanArea}>
+            <video ref={videoRef} style={styles.video} playsInline muted />
+            <canvas ref={canvasRef} style={{ display: "none" }} />
+            <div style={styles.scanFrame}>
+              <div style={{ ...styles.scanCorner, top: 0, left: 0, borderTopWidth: 3, borderLeftWidth: 3 }} />
+              <div style={{ ...styles.scanCorner, top: 0, right: 0, borderTopWidth: 3, borderRightWidth: 3 }} />
+              <div style={{ ...styles.scanCorner, bottom: 0, left: 0, borderBottomWidth: 3, borderLeftWidth: 3 }} />
+              <div style={{ ...styles.scanCorner, bottom: 0, right: 0, borderBottomWidth: 3, borderRightWidth: 3 }} />
+              <div style={styles.scanLine} />
+            </div>
+          </div>
+          <p style={styles.scanHint}>ブースのQRコードをカメラに向けてください</p>
+          <div style={styles.manualSection}>
+            <p style={{ color: "rgba(255,255,255,0.4)", fontSize: 11, textAlign: "center", marginBottom: 8 }}>
+              ─ テスト用手動入力 ─
+            </p>
+            <div style={styles.manualRow}>
+              <select value={manualId} onChange={e => setManualId(e.target.value)} style={styles.manualSelect}>
+                <option value="">ブースを選択...</option>
+                {booths.map(b => (
+                  <option key={b.id} value={b.id} disabled={stamps.includes(b.id)}>
+                    {b.icon} {b.name}{stamps.includes(b.id) ? " ✓" : ""}
+                  </option>
+                ))}
+              </select>
+              <button style={styles.manualBtn} onClick={handleManual}>取得</button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ==================== LIST PAGE (Stamp Card) ====================
+function StampCell({ booth, done, index, newlyStamped }) {
+  const isNew = newlyStamped === booth.id;
+  return (
+    <div style={{
+      ...stampCellStyles.cell,
+      ...(done ? stampCellStyles.cellDone : stampCellStyles.cellEmpty),
+      animationName: isNew ? "stampBounce" : "none",
+    }}>
+      {/* 枠の角飾り */}
+      <div style={{ ...stampCellStyles.corner, top: 3, left: 3 }} />
+      <div style={{ ...stampCellStyles.corner, top: 3, right: 3 }} />
+      <div style={{ ...stampCellStyles.corner, bottom: 3, left: 3 }} />
+      <div style={{ ...stampCellStyles.corner, bottom: 3, right: 3 }} />
+
+      {done ? (
+        /* ── スタンプ押印済み ── */
+        <div style={stampCellStyles.stampInk}>
+          {/* インク滲みエフェクト */}
+          <div style={{
+            ...stampCellStyles.inkBlot,
+            background: booth.color + "44",
+            transform: `rotate(${(index * 37) % 30 - 15}deg)`,
+          }} />
+          {/* メインアイコン */}
+          <div style={{ ...stampCellStyles.stampIcon, transform: `rotate(${(index * 13) % 10 - 5}deg)` }}>
+            <span style={{ fontSize: 28, display: "block", lineHeight: 1 }}>{booth.icon}</span>
+          </div>
+          {/* スタンプ枠線 */}
+          <div style={{
+            ...stampCellStyles.stampRing,
+            borderColor: booth.color,
+            transform: `rotate(${(index * 13) % 10 - 5}deg)`,
+          }} />
+          {/* ブース名ラベル（スタンプ内） */}
+          <div style={{
+            ...stampCellStyles.stampLabel,
+            color: booth.color,
+            transform: `rotate(${(index * 13) % 10 - 5}deg)`,
+          }}>
+            {booth.name}
+          </div>
+          {/* 押印済みバナー */}
+          <div style={{ ...stampCellStyles.doneBanner, background: booth.color + "cc" }}>済</div>
+        </div>
+      ) : (
+        /* ── 未取得 ── */
+        <div style={stampCellStyles.emptyInner}>
+          <div style={stampCellStyles.emptyNum}>{String(index + 1).padStart(2, "0")}</div>
+          <div style={stampCellStyles.emptyName}>{booth.name}</div>
+          <div style={stampCellStyles.emptyIcon}>?</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ListPage({ booths, stamps, onBack, newlyStamped }) {
+  const total = booths.length;
+  const got   = stamps.length;
+  const pct   = total > 0 ? Math.round(got / total * 100) : 0;
+
+  // グリッド列数：ブース数に応じて調整
+  const cols = total <= 6 ? 2 : total <= 12 ? 3 : 4;
+
+  return (
+    <div style={styles.page}>
+      <div style={styles.pageHeader}>
+        <button style={styles.backBtn} onClick={onBack}>← 戻る</button>
+        <h2 style={styles.pageTitle}>スタンプカード</h2>
+        <div style={styles.countBadge}>{got}/{total}</div>
+      </div>
+
+      {/* 進捗バー */}
+      <div style={stampCardStyles.progressWrap}>
+        <div style={stampCardStyles.progressTrack}>
+          <div style={{ ...stampCardStyles.progressBar, width: `${pct}%` }} />
+          {pct > 8 && (
+            <span style={stampCardStyles.progressPct}>{pct}%</span>
+          )}
+        </div>
+        <span style={stampCardStyles.progressLabel}>
+          {got === total ? "🎉 コンプリート！" : `あと ${total - got} 個`}
+        </span>
+      </div>
+
+      {/* スタンプカード本体 */}
+      <div style={stampCardStyles.card}>
+        {/* カード上部装飾 */}
+        <div style={stampCardStyles.cardHeader}>
+          <span style={{ fontSize: 16 }}>🎪</span>
+          <span style={stampCardStyles.cardTitle}>学園祭スタンプカード</span>
+          <span style={{ fontSize: 16 }}>🎪</span>
+        </div>
+
+        {/* スタンプグリッド */}
+        <div style={{ ...stampCardStyles.grid, gridTemplateColumns: `repeat(${cols}, 1fr)` }}>
+          {booths.map((booth, i) => (
+            <StampCell
+              key={booth.id}
+              booth={booth}
+              done={stamps.includes(booth.id)}
+              index={i}
+              newlyStamped={newlyStamped}
+            />
+          ))}
+        </div>
+
+        {/* カード下部 */}
+        <div style={stampCardStyles.cardFooter}>
+          {got === total ? (
+            <div style={stampCardStyles.completeMsg}>
+              ✨ 全スタンプ制覇！景品交換へ進んでください ✨
+            </div>
+          ) : (
+            <div style={stampCardStyles.footerMsg}>
+              QRコードをスキャンしてスタンプを集めよう！
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Stamp card styles ──
+const stampCellStyles = {
+  cell: {
+    position: "relative",
+    aspectRatio: "1",
+    borderRadius: 10,
+    overflow: "hidden",
+    animationDuration: "0.5s",
+    animationTimingFunction: "cubic-bezier(0.36,0.07,0.19,0.97)",
+    animationFillMode: "both",
+  },
+  cellEmpty: {
+    background: "rgba(255,255,255,0.04)",
+    border: "1.5px dashed rgba(255,255,255,0.15)",
+  },
+  cellDone: {
+    background: "rgba(255,255,255,0.08)",
+    border: "1.5px solid rgba(255,255,255,0.2)",
+    boxShadow: "0 2px 12px rgba(0,0,0,0.3)",
+  },
+  corner: {
+    position: "absolute",
+    width: 7,
+    height: 7,
+    borderColor: "rgba(255,255,255,0.2)",
+    borderStyle: "solid",
+    borderWidth: 0,
+    zIndex: 2,
+    pointerEvents: "none",
+  },
+  stampInk: {
+    position: "absolute",
+    inset: 0,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 2,
+  },
+  inkBlot: {
+    position: "absolute",
+    inset: "10%",
+    borderRadius: "50%",
+    opacity: 0.6,
+    animation: "inkSpread 0.5s cubic-bezier(0.36,0.07,0.19,0.97) both",
+  },
+  stampIcon: {
+    position: "relative",
+    zIndex: 2,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    filter: "drop-shadow(0 1px 3px rgba(0,0,0,0.5))",
+  },
+  stampRing: {
+    position: "absolute",
+    inset: "12%",
+    borderRadius: "50%",
+    border: "2px solid",
+    opacity: 0.5,
+    zIndex: 1,
+  },
+  stampLabel: {
+    position: "relative",
+    zIndex: 2,
+    fontSize: 9,
+    fontWeight: 800,
+    letterSpacing: 0.5,
+    textAlign: "center",
+    lineHeight: 1.2,
+    maxWidth: "80%",
+    textShadow: "0 1px 2px rgba(0,0,0,0.6)",
+    marginTop: 2,
+  },
+  doneBanner: {
+    position: "absolute",
+    bottom: 0,
+    right: 0,
+    padding: "2px 6px",
+    fontSize: 9,
+    fontWeight: 900,
+    color: "#fff",
+    borderTopLeftRadius: 6,
+    letterSpacing: 1,
+  },
+  emptyInner: {
+    position: "absolute",
+    inset: 0,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 2,
+  },
+  emptyNum: {
+    fontSize: 9,
+    color: "rgba(255,255,255,0.2)",
+    fontWeight: 700,
+    letterSpacing: 1,
+  },
+  emptyName: {
+    fontSize: 8,
+    color: "rgba(255,255,255,0.2)",
+    textAlign: "center",
+    maxWidth: "85%",
+    lineHeight: 1.3,
+  },
+  emptyIcon: {
+    fontSize: 18,
+    color: "rgba(255,255,255,0.08)",
+    fontWeight: 900,
+    marginTop: 2,
+  },
+};
+
+const stampCardStyles = {
+  progressWrap: {
+    padding: "4px 20px 12px",
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+  },
+  progressTrack: {
+    flex: 1,
+    height: 10,
+    background: "rgba(255,255,255,0.08)",
+    borderRadius: 5,
+    overflow: "hidden",
+    position: "relative",
+  },
+  progressBar: {
+    height: "100%",
+    background: "linear-gradient(90deg, #667eea, #f093fb)",
+    borderRadius: 5,
+    transition: "width 0.6s cubic-bezier(0.4,0,0.2,1)",
+  },
+  progressPct: {
+    position: "absolute",
+    right: 4,
+    top: "50%",
+    transform: "translateY(-50%)",
+    fontSize: 8,
+    fontWeight: 700,
+    color: "#fff",
+  },
+  progressLabel: {
+    color: "rgba(255,255,255,0.6)",
+    fontSize: 12,
+    fontWeight: 600,
+    whiteSpace: "nowrap",
+  },
+  card: {
+    margin: "0 14px",
+    background: "linear-gradient(145deg, rgba(30,27,74,0.9) 0%, rgba(48,43,99,0.9) 100%)",
+    borderRadius: 20,
+    border: "1px solid rgba(255,255,255,0.12)",
+    overflow: "hidden",
+    boxShadow: "0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.08)",
+  },
+  cardHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    padding: "12px 16px 10px",
+    borderBottom: "1px dashed rgba(255,255,255,0.1)",
+    background: "rgba(255,255,255,0.03)",
+  },
+  cardTitle: {
+    fontSize: 13,
+    fontWeight: 800,
+    color: "rgba(255,255,255,0.7)",
+    letterSpacing: 2,
+  },
+  grid: {
+    display: "grid",
+    gap: 8,
+    padding: 12,
+  },
+  cardFooter: {
+    borderTop: "1px dashed rgba(255,255,255,0.1)",
+    padding: "10px 16px",
+    background: "rgba(255,255,255,0.02)",
+  },
+  completeMsg: {
+    textAlign: "center",
+    fontSize: 12,
+    fontWeight: 700,
+    color: "#f093fb",
+    letterSpacing: 0.5,
+  },
+  footerMsg: {
+    textAlign: "center",
+    fontSize: 11,
+    color: "rgba(255,255,255,0.3)",
+    letterSpacing: 0.5,
+  },
+};
+
+// ==================== COMPLETE PAGE ====================
+function CompletePage({ userPrize, claimed, onGetPrize, onClaim, onBack }) {
+  const [revealed, setRevealed] = useState(!!userPrize);
+  const [confirming, setConfirming] = useState(false);
+
+  const handleReveal = () => {
+    onGetPrize();
+    setRevealed(true);
+  };
+
+  return (
+    <div style={styles.page}>
+      <div style={styles.confettiArea}>
+        {[...Array(20)].map((_, i) => (
+          <div key={i} style={{ ...styles.confettiPiece, left: `${Math.random() * 100}%`, animationDelay: `${Math.random() * 2}s`, background: ["#f093fb","#f5576c","#ffd200","#00c9a7","#667eea"][i % 5] }} />
+        ))}
+      </div>
+
+      <div style={styles.completePage}>
+        <div style={{ fontSize: 60, marginBottom: 8 }}>🎊</div>
+        <h2 style={styles.completeTitle}>コンプリート！</h2>
+        <p style={styles.completeSubtitle}>全ブースを制覇しました！</p>
+
+        {!revealed ? (
+          <button style={styles.btnGold} onClick={handleReveal}>
+            🎁 景品を確認する
+          </button>
+        ) : claimed ? (
+          <div style={styles.claimedBox}>
+            <div style={{ fontSize: 50 }}>{userPrize?.icon}</div>
+            <div style={styles.prizeName}>{userPrize?.name}</div>
+            <div style={styles.claimedLabel}>受け取り済み ✓</div>
+            <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 13, marginTop: 16 }}>
+              ご参加ありがとうございました！
+            </p>
+            <button style={styles.btnSecondary} onClick={onBack}>ホームに戻る</button>
+          </div>
+        ) : (
+          <div style={styles.prizeBox}>
+            <div style={{ fontSize: 56 }}>{userPrize?.icon}</div>
+            <div style={styles.prizeName}>{userPrize?.name}</div>
+            <p style={styles.prizeNote}>スタッフに画面を見せて景品を受け取ってください</p>
+
+            {!confirming ? (
+              <button style={styles.btnGold} onClick={() => setConfirming(true)}>
+                景品を受け取る
+              </button>
+            ) : (
+              <div style={styles.confirmBox}>
+                <p style={{ color: "#fff", marginBottom: 12, fontWeight: 600 }}>
+                  景品を受け取りましたか？<br />
+                  <span style={{ fontSize: 12, fontWeight: 400, color: "rgba(255,255,255,0.6)" }}>
+                    ※ この操作は取り消せません
+                  </span>
+                </p>
+                <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+                  <button style={styles.btnConfirmYes} onClick={onClaim}>はい、受け取りました</button>
+                  <button style={styles.btnConfirmNo} onClick={() => setConfirming(false)}>いいえ</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ==================== ADMIN PAGE ====================
+function AdminPage({ booths, setBooths, prizes, setPrizes, onBack, onStaff }) {
+  const [authed, setAuthed] = useState(false);
+  const [pw, setPw] = useState("");
+  const [tab, setTab] = useState("booths");
+  const [editBooth, setEditBooth] = useState(null);
+  const [newBooth, setNewBooth] = useState({ name: "", description: "", icon: "📍", color: "#667eea" });
+  const [editPrize, setEditPrize] = useState(null);
+
+  if (!authed) {
+    return (
+      <div style={styles.page}>
+        <div style={styles.pageHeader}>
+          <button style={styles.backBtn} onClick={onBack}>← 戻る</button>
+          <h2 style={styles.pageTitle}>管理者ログイン</h2>
+          <div />
+        </div>
+        <div style={styles.authBox}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>🔐</div>
+          <input
+            type="password" placeholder="パスワード" value={pw}
+            onChange={e => setPw(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && pw === ADMIN_PASSWORD && setAuthed(true)}
+            style={styles.authInput}
+          />
+          <button style={styles.btnPrimary} onClick={() => {
+            if (pw === ADMIN_PASSWORD) setAuthed(true);
+            else { alert("パスワードが違います"); setPw(""); }
+          }}>ログイン</button>
+          <p style={{ color: "rgba(255,255,255,0.3)", fontSize: 11, marginTop: 12 }}>
+            デフォルト: admin2024
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const visitors = storage.get(STORAGE_KEYS.VISITORS, {});
+  const claims = storage.get(STORAGE_KEYS.PRIZE_CLAIMS, []);
+  const visitorList = Object.entries(visitors);
+
+  return (
+    <div style={styles.page}>
+      <div style={styles.pageHeader}>
+        <button style={styles.backBtn} onClick={onBack}>← 戻る</button>
+        <h2 style={styles.pageTitle}>管理者画面</h2>
+        <button style={styles.staffBtn} onClick={onStaff}>スタッフ</button>
+      </div>
+
+      {/* Tabs */}
+      <div style={styles.tabs}>
+        {["booths","prizes","visitors"].map(t => (
+          <button key={t} style={{ ...styles.tab, ...(tab === t ? styles.tabActive : {}) }} onClick={() => setTab(t)}>
+            {t === "booths" ? "🏛 ブース" : t === "prizes" ? "🎁 景品" : "👥 来場者"}
+          </button>
+        ))}
+      </div>
+
+      {/* ── BOOTHS TAB ── */}
+      {tab === "booths" && (
+        <div style={styles.tabContent}>
+          <h3 style={styles.sectionTitle}>ブース一覧 ({booths.length}箇所)</h3>
+          <div style={styles.qrInfo}>
+            💡 QRコードのURLに <code style={{ background: "rgba(255,255,255,0.1)", padding: "2px 6px", borderRadius: 4, fontSize: 11 }}>?stamp=STAMP_RALLY:ブースID</code> を含めてください
+          </div>
+          {booths.map((b, i) => (
+            <div key={b.id} style={styles.adminCard}>
+              {editBooth?.id === b.id ? (
+                <div style={styles.editForm}>
+                  <input value={editBooth.name} onChange={e => setEditBooth({ ...editBooth, name: e.target.value })} style={styles.adminInput} placeholder="ブース名" />
+                  <input value={editBooth.description} onChange={e => setEditBooth({ ...editBooth, description: e.target.value })} style={styles.adminInput} placeholder="説明" />
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input value={editBooth.icon} onChange={e => setEditBooth({ ...editBooth, icon: e.target.value })} style={{ ...styles.adminInput, width: 60 }} placeholder="絵文字" />
+                    <input type="color" value={editBooth.color} onChange={e => setEditBooth({ ...editBooth, color: e.target.value })} style={{ ...styles.adminInput, width: 50, padding: 2 }} />
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button style={styles.btnSave} onClick={() => { setBooths(booths.map(x => x.id === editBooth.id ? editBooth : x)); setEditBooth(null); }}>保存</button>
+                    <button style={styles.btnCancel} onClick={() => setEditBooth(null)}>キャンセル</button>
+                  </div>
+                </div>
+              ) : (
+                <div style={styles.adminRow}>
+                  <span style={{ fontSize: 24 }}>{b.icon}</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ color: "#fff", fontWeight: 600 }}>{b.name}</div>
+                    <div style={{ color: "rgba(255,255,255,0.4)", fontSize: 12 }}>{b.description}</div>
+                    <div style={{ color: "rgba(255,255,255,0.3)", fontSize: 11, marginTop: 2 }}>ID: {b.id}</div>
+                    <QRDisplay boothId={b.id} />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <button style={styles.btnEdit} onClick={() => setEditBooth(b)}>編集</button>
+                    <button style={styles.btnDel} onClick={() => { if (confirm("削除しますか？")) setBooths(booths.filter(x => x.id !== b.id)); }}>削除</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+
+          {/* Add new booth */}
+          <div style={styles.adminCard}>
+            <h4 style={{ color: "rgba(255,255,255,0.6)", fontSize: 13, marginBottom: 10 }}>＋ ブースを追加</h4>
+            <input value={newBooth.name} onChange={e => setNewBooth({ ...newBooth, name: e.target.value })} style={styles.adminInput} placeholder="ブース名" />
+            <input value={newBooth.description} onChange={e => setNewBooth({ ...newBooth, description: e.target.value })} style={styles.adminInput} placeholder="説明" />
+            <div style={{ display: "flex", gap: 8 }}>
+              <input value={newBooth.icon} onChange={e => setNewBooth({ ...newBooth, icon: e.target.value })} style={{ ...styles.adminInput, width: 60 }} placeholder="絵文字" />
+              <input type="color" value={newBooth.color} onChange={e => setNewBooth({ ...newBooth, color: e.target.value })} style={{ ...styles.adminInput, width: 50, padding: 2 }} />
+            </div>
+            <button style={styles.btnSave} onClick={() => {
+              if (!newBooth.name) return;
+              const id = "booth_" + String(booths.length + 1).padStart(2, "0");
+              setBooths([...booths, { ...newBooth, id }]);
+              setNewBooth({ name: "", description: "", icon: "📍", color: "#667eea" });
+            }}>追加</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── PRIZES TAB ── */}
+      {tab === "prizes" && (
+        <div style={styles.tabContent}>
+          <h3 style={styles.sectionTitle}>景品管理</h3>
+          {prizes.map(p => (
+            <div key={p.id} style={styles.adminCard}>
+              {editPrize?.id === p.id ? (
+                <div style={styles.editForm}>
+                  <input value={editPrize.name} onChange={e => setEditPrize({ ...editPrize, name: e.target.value })} style={styles.adminInput} placeholder="景品名" />
+                  <input value={editPrize.icon} onChange={e => setEditPrize({ ...editPrize, icon: e.target.value })} style={{ ...styles.adminInput, width: 70 }} placeholder="絵文字" />
+                  <div style={styles.stockRow}>
+                    <span style={{ color: "rgba(255,255,255,0.6)", fontSize: 13 }}>在庫数:</span>
+                    <button style={styles.stockBtn} onClick={() => setEditPrize({ ...editPrize, stock: Math.max(0, editPrize.stock - 1) })}>−</button>
+                    <span style={styles.stockNum}>{editPrize.stock}</span>
+                    <button style={styles.stockBtn} onClick={() => setEditPrize({ ...editPrize, stock: editPrize.stock + 1 })}>＋</button>
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button style={styles.btnSave} onClick={() => { setPrizes(prizes.map(x => x.id === editPrize.id ? editPrize : x)); setEditPrize(null); }}>保存</button>
+                    <button style={styles.btnCancel} onClick={() => setEditPrize(null)}>キャンセル</button>
+                  </div>
+                </div>
+              ) : (
+                <div style={styles.adminRow}>
+                  <span style={{ fontSize: 28 }}>{p.icon}</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ color: "#fff", fontWeight: 600 }}>{p.name}</div>
+                    <div style={{ color: p.stock > 0 ? "#4ade80" : "#f87171", fontSize: 13, marginTop: 2 }}>
+                      在庫: {p.stock}個{p.stock === 0 ? " (在庫切れ)" : ""}
+                    </div>
+                  </div>
+                  <button style={styles.btnEdit} onClick={() => setEditPrize(p)}>編集</button>
+                </div>
+              )}
+            </div>
+          ))}
+
+          {/* Add prize */}
+          <div style={styles.adminCard}>
+            <h4 style={{ color: "rgba(255,255,255,0.6)", fontSize: 13, marginBottom: 10 }}>＋ 景品を追加</h4>
+            <AddPrizeForm prizes={prizes} setPrizes={setPrizes} />
+          </div>
+        </div>
+      )}
+
+      {/* ── VISITORS TAB ── */}
+      {tab === "visitors" && (
+        <div style={styles.tabContent}>
+          <div style={styles.statsRow}>
+            <div style={styles.statBox}>
+              <div style={styles.statNum}>{visitorList.length}</div>
+              <div style={styles.statLabel}>参加者数</div>
+            </div>
+            <div style={styles.statBox}>
+              <div style={styles.statNum}>{visitorList.filter(([,v]) => v.stamps?.length === booths.length).length}</div>
+              <div style={styles.statLabel}>コンプリート</div>
+            </div>
+            <div style={styles.statBox}>
+              <div style={styles.statNum}>{claims.length}</div>
+              <div style={styles.statLabel}>景品受取済</div>
+            </div>
+          </div>
+
+          {visitorList.length === 0 ? (
+            <p style={{ color: "rgba(255,255,255,0.3)", textAlign: "center", marginTop: 40 }}>来場者データなし</p>
+          ) : (
+            visitorList.map(([uid, v]) => (
+              <div key={uid} style={styles.adminCard}>
+                <div style={styles.adminRow}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 11, marginBottom: 4 }}>{uid}</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                      {(v.stamps || []).map(sid => {
+                        const b = booths.find(b => b.id === sid);
+                        return b ? <span key={sid} style={styles.stampChip}>{b.icon}</span> : null;
+                      })}
+                    </div>
+                    <div style={{ color: "rgba(255,255,255,0.4)", fontSize: 12, marginTop: 6 }}>
+                      {v.stamps?.length || 0}/{booths.length}箇所
+                      {v.claimed && " · 景品受取済"}
+                    </div>
+                  </div>
+                  {v.stamps?.length === booths.length && (
+                    <span style={{ ...styles.stampChip, background: "#4ade80", color: "#000" }}>完了</span>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddPrizeForm({ prizes, setPrizes }) {
+  const [form, setForm] = useState({ name: "", icon: "🎁", stock: 10 });
+  return (
+    <div style={styles.editForm}>
+      <input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} style={styles.adminInput} placeholder="景品名" />
+      <input value={form.icon} onChange={e => setForm({ ...form, icon: e.target.value })} style={{ ...styles.adminInput, width: 70 }} placeholder="絵文字" />
+      <div style={styles.stockRow}>
+        <span style={{ color: "rgba(255,255,255,0.6)", fontSize: 13 }}>在庫数:</span>
+        <button style={styles.stockBtn} onClick={() => setForm({ ...form, stock: Math.max(0, form.stock - 1) })}>−</button>
+        <span style={styles.stockNum}>{form.stock}</span>
+        <button style={styles.stockBtn} onClick={() => setForm({ ...form, stock: form.stock + 1 })}>＋</button>
+      </div>
+      <button style={styles.btnSave} onClick={() => {
+        if (!form.name) return;
+        const id = "p" + (prizes.length + 1);
+        setPrizes([...prizes, { ...form, id }]);
+        setForm({ name: "", icon: "🎁", stock: 10 });
+      }}>追加</button>
+    </div>
+  );
+}
+
+// ==================== QR DISPLAY ====================
+function QRDisplay({ boothId }) {
+  const [show, setShow] = useState(false);
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    if (!show || !canvasRef.current) return;
+    const text = `STAMP_RALLY:${boothId}`;
+    // Simple QR-like visualization using qrcode.js via CDN
+    if (!window.QRCode) {
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js";
+      s.onload = () => renderQR(text);
+      document.head.appendChild(s);
+    } else {
+      renderQR(text);
+    }
+    function renderQR(t) {
+      canvasRef.current.innerHTML = "";
+      new window.QRCode(canvasRef.current, { text: t, width: 128, height: 128, colorDark: "#000", colorLight: "#fff" });
+    }
+  }, [show, boothId]);
+
+  return (
+    <div>
+      <button style={{ ...styles.btnEdit, marginTop: 4, fontSize: 11 }} onClick={() => setShow(!show)}>
+        {show ? "QR非表示" : "QR表示"}
+      </button>
+      {show && (
+        <div style={{ marginTop: 8, background: "#fff", padding: 8, borderRadius: 8, display: "inline-block" }}>
+          <div ref={canvasRef} />
+          <div style={{ fontSize: 10, color: "#333", textAlign: "center", marginTop: 4 }}>
+            STAMP_RALLY:{boothId}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ==================== STAFF PAGE ====================
+function StaffPage({ onBack, prizes }) {
+  const claims = storage.get(STORAGE_KEYS.PRIZE_CLAIMS, []);
+  const visitors = storage.get(STORAGE_KEYS.VISITORS, {});
+
+  // Find users who claimed but pending staff check
+  const pending = Object.entries(visitors).filter(([, v]) => v.claimed);
+
+  return (
+    <div style={styles.page}>
+      <div style={styles.pageHeader}>
+        <button style={styles.backBtn} onClick={onBack}>← 戻る</button>
+        <h2 style={styles.pageTitle}>スタッフ確認</h2>
+        <div />
+      </div>
+
+      <div style={styles.tabContent}>
+        <h3 style={styles.sectionTitle}>景品受取記録 ({claims.length}件)</h3>
+        {claims.length === 0 ? (
+          <p style={{ color: "rgba(255,255,255,0.3)", textAlign: "center", marginTop: 30 }}>まだ景品受取なし</p>
+        ) : (
+          [...claims].reverse().map((c, i) => (
+            <div key={i} style={styles.adminCard}>
+              <div style={styles.adminRow}>
+                <span style={{ fontSize: 28 }}>{c.prize?.icon}</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: "#fff", fontWeight: 600 }}>{c.prize?.name}</div>
+                  <div style={{ color: "rgba(255,255,255,0.4)", fontSize: 12 }}>
+                    {new Date(c.claimedAt).toLocaleString("ja-JP")}
+                  </div>
+                  <div style={{ color: "rgba(255,255,255,0.3)", fontSize: 11 }}>{c.userId}</div>
+                </div>
+                <span style={{ ...styles.stampChip, background: "#4ade80", color: "#000" }}>✓ 受取済</span>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ==================== STYLES ====================
+const styles = {
+  app: {
+    minHeight: "100dvh",
+    background: "linear-gradient(160deg, #0f0c29 0%, #302b63 50%, #24243e 100%)",
+    fontFamily: "'Noto Sans JP', 'Hiragino Sans', sans-serif",
+    color: "#fff",
+    position: "relative",
+    overflow: "hidden",
+  },
+  page: {
+    minHeight: "100dvh",
+    display: "flex",
+    flexDirection: "column",
+    padding: "0 0 40px",
+    maxWidth: 480,
+    margin: "0 auto",
+  },
+  // Home
+  homeHeader: {
+    textAlign: "center",
+    padding: "48px 24px 20px",
+    background: "linear-gradient(180deg, rgba(102,126,234,0.2) 0%, transparent 100%)",
+  },
+  festivalBadge: {
+    display: "inline-block",
+    background: "linear-gradient(135deg, #f093fb, #f5576c)",
+    padding: "4px 16px",
+    borderRadius: 20,
+    fontSize: 13,
+    fontWeight: 700,
+    marginBottom: 12,
+    letterSpacing: 1,
+  },
+  homeTitle: {
+    fontSize: 36,
+    fontWeight: 900,
+    margin: "0 0 6px",
+    background: "linear-gradient(135deg, #fff 0%, #c0c0ff 100%)",
+    WebkitBackgroundClip: "text",
+    WebkitTextFillColor: "transparent",
+    letterSpacing: -1,
+  },
+  homeSubtitle: {
+    color: "rgba(255,255,255,0.5)",
+    fontSize: 14,
+    margin: 0,
+  },
+  progressSection: {
+    display: "flex",
+    justifyContent: "center",
+    padding: "16px 0",
+  },
+  ringWrapper: {
+    position: "relative",
+    width: 180,
+    height: 180,
+  },
+  ringInner: {
+    position: "absolute",
+    inset: 0,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  ringNum: {
+    fontSize: 42,
+    fontWeight: 900,
+    lineHeight: 1,
+    background: "linear-gradient(135deg, #fff, #c0c0ff)",
+    WebkitBackgroundClip: "text",
+    WebkitTextFillColor: "transparent",
+  },
+  ringOf: { color: "rgba(255,255,255,0.4)", fontSize: 16 },
+  ringLabel: { color: "rgba(255,255,255,0.6)", fontSize: 12, marginTop: 2 },
+  statusCard: {
+    margin: "0 20px 16px",
+    background: "rgba(255,255,255,0.05)",
+    borderRadius: 16,
+    padding: "16px 20px",
+    border: "1px solid rgba(255,255,255,0.08)",
+  },
+  statusComplete: {
+    display: "flex",
+    alignItems: "center",
+    gap: 14,
+  },
+  statusProgress: {},
+  statusTitle: {
+    fontWeight: 700,
+    fontSize: 16,
+    color: "#fff",
+  },
+  statusSub: {
+    color: "rgba(255,255,255,0.5)",
+    fontSize: 13,
+    marginTop: 4,
+  },
+  progressBar: {
+    height: 8,
+    background: "rgba(255,255,255,0.1)",
+    borderRadius: 4,
+    overflow: "hidden",
+    marginBottom: 8,
+  },
+  progressFill: {
+    height: "100%",
+    background: "linear-gradient(90deg, #667eea, #764ba2)",
+    borderRadius: 4,
+    transition: "width 0.5s ease",
+  },
+  actions: {
+    padding: "0 20px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+  },
+  btnPrimary: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    padding: "16px",
+    background: "linear-gradient(135deg, #667eea, #764ba2)",
+    border: "none",
+    borderRadius: 16,
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: 700,
+    cursor: "pointer",
+    boxShadow: "0 4px 20px rgba(102,126,234,0.4)",
+    letterSpacing: 0.5,
+  },
+  btnSecondary: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    padding: "14px",
+    background: "rgba(255,255,255,0.06)",
+    border: "1px solid rgba(255,255,255,0.15)",
+    borderRadius: 16,
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+  btnGold: {
+    padding: "16px 32px",
+    background: "linear-gradient(135deg, #f6d365, #fda085)",
+    border: "none",
+    borderRadius: 16,
+    color: "#000",
+    fontSize: 16,
+    fontWeight: 700,
+    cursor: "pointer",
+    boxShadow: "0 4px 20px rgba(246,211,101,0.4)",
+    width: "100%",
+  },
+  adminLink: {
+    background: "none",
+    border: "none",
+    color: "rgba(255,255,255,0.2)",
+    fontSize: 12,
+    cursor: "pointer",
+    textAlign: "center",
+    padding: "20px",
+    display: "block",
+    width: "100%",
+    marginTop: 8,
+  },
+  // Page header
+  pageHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "52px 20px 16px",
+  },
+  backBtn: {
+    background: "none",
+    border: "1px solid rgba(255,255,255,0.2)",
+    color: "#fff",
+    padding: "6px 14px",
+    borderRadius: 20,
+    cursor: "pointer",
+    fontSize: 13,
+  },
+  pageTitle: {
+    fontSize: 20,
+    fontWeight: 800,
+    margin: 0,
+    letterSpacing: -0.5,
+  },
+  countBadge: {
+    background: "rgba(102,126,234,0.3)",
+    padding: "4px 12px",
+    borderRadius: 12,
+    fontSize: 13,
+    fontWeight: 700,
+  },
+  staffBtn: {
+    background: "linear-gradient(135deg,#f093fb,#f5576c)",
+    border: "none",
+    color: "#fff",
+    padding: "6px 14px",
+    borderRadius: 20,
+    cursor: "pointer",
+    fontSize: 13,
+    fontWeight: 700,
+  },
+  // Scan
+  scanArea: {
+    margin: "0 20px",
+    borderRadius: 20,
+    overflow: "hidden",
+    position: "relative",
+    background: "#000",
+    aspectRatio: "1",
+  },
+  video: {
+    width: "100%",
+    height: "100%",
+    objectFit: "cover",
+    display: "block",
+  },
+  scanFrame: {
+    position: "absolute",
+    inset: "20%",
+    pointerEvents: "none",
+  },
+  scanCorner: {
+    position: "absolute",
+    width: 24,
+    height: 24,
+    borderColor: "#667eea",
+    borderStyle: "solid",
+    borderWidth: 0,
+  },
+  scanLine: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    height: 2,
+    background: "linear-gradient(90deg, transparent, #667eea, transparent)",
+    animation: "scanLine 2s ease-in-out infinite",
+    top: "50%",
+  },
+  scanHint: {
+    textAlign: "center",
+    color: "rgba(255,255,255,0.5)",
+    fontSize: 13,
+    margin: "16px 0 8px",
+  },
+  scanError: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    height: "100%",
+    padding: 24,
+    textAlign: "center",
+    color: "rgba(255,255,255,0.6)",
+    fontSize: 14,
+  },
+  manualSection: {
+    padding: "0 20px",
+    marginTop: 8,
+  },
+  manualRow: {
+    display: "flex",
+    gap: 8,
+  },
+  manualSelect: {
+    flex: 1,
+    background: "rgba(255,255,255,0.08)",
+    border: "1px solid rgba(255,255,255,0.15)",
+    color: "#fff",
+    padding: "10px 12px",
+    borderRadius: 12,
+    fontSize: 14,
+  },
+  manualBtn: {
+    background: "rgba(102,126,234,0.5)",
+    border: "none",
+    color: "#fff",
+    padding: "10px 16px",
+    borderRadius: 12,
+    cursor: "pointer",
+    fontWeight: 700,
+  },
+  // List
+  boothGrid: {
+    padding: "0 16px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+  },
+  boothCard: {
+    display: "flex",
+    alignItems: "center",
+    gap: 14,
+    background: "rgba(255,255,255,0.07)",
+    borderRadius: 16,
+    padding: "14px 16px",
+    border: "1px solid rgba(255,255,255,0.1)",
+    transition: "opacity 0.2s",
+  },
+  boothCardLocked: {
+    opacity: 0.6,
+  },
+  boothIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 14,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  boothInfo: { flex: 1 },
+  boothName: { fontWeight: 700, fontSize: 15 },
+  boothDesc: { fontSize: 12, marginTop: 2 },
+  stampMark: {
+    width: 32,
+    height: 32,
+    borderRadius: "50%",
+    background: "linear-gradient(135deg,#667eea,#764ba2)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+    fontWeight: 700,
+  },
+  // Complete
+  completePage: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    padding: "20px 24px",
+    flex: 1,
+  },
+  completeTitle: {
+    fontSize: 36,
+    fontWeight: 900,
+    margin: "0 0 8px",
+    background: "linear-gradient(135deg,#f093fb,#f5576c)",
+    WebkitBackgroundClip: "text",
+    WebkitTextFillColor: "transparent",
+  },
+  completeSubtitle: {
+    color: "rgba(255,255,255,0.6)",
+    fontSize: 15,
+    marginBottom: 28,
+  },
+  prizeBox: {
+    width: "100%",
+    background: "rgba(255,255,255,0.05)",
+    borderRadius: 24,
+    padding: "28px 20px",
+    textAlign: "center",
+    border: "1px solid rgba(255,255,255,0.1)",
+  },
+  prizeName: {
+    fontSize: 24,
+    fontWeight: 800,
+    color: "#fff",
+    margin: "12px 0 8px",
+  },
+  prizeNote: {
+    color: "rgba(255,255,255,0.5)",
+    fontSize: 13,
+    marginBottom: 20,
+  },
+  claimedBox: {
+    width: "100%",
+    background: "rgba(74,222,128,0.1)",
+    borderRadius: 24,
+    padding: "28px 20px",
+    textAlign: "center",
+    border: "1px solid rgba(74,222,128,0.3)",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: 8,
+  },
+  claimedLabel: {
+    color: "#4ade80",
+    fontWeight: 700,
+    fontSize: 16,
+  },
+  confirmBox: {
+    background: "rgba(255,255,255,0.05)",
+    borderRadius: 16,
+    padding: "16px",
+    marginTop: 12,
+    width: "100%",
+    textAlign: "center",
+  },
+  btnConfirmYes: {
+    background: "linear-gradient(135deg,#4ade80,#22c55e)",
+    border: "none",
+    color: "#000",
+    padding: "12px 16px",
+    borderRadius: 12,
+    fontWeight: 700,
+    cursor: "pointer",
+    fontSize: 14,
+  },
+  btnConfirmNo: {
+    background: "rgba(255,255,255,0.1)",
+    border: "none",
+    color: "#fff",
+    padding: "12px 16px",
+    borderRadius: 12,
+    cursor: "pointer",
+    fontSize: 14,
+  },
+  confettiArea: {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 0,
+    overflow: "visible",
+    pointerEvents: "none",
+    zIndex: 10,
+  },
+  confettiPiece: {
+    position: "absolute",
+    top: -20,
+    width: 8,
+    height: 8,
+    borderRadius: 2,
+    animation: "confettiFall 3s ease-in forwards",
+  },
+  // Admin
+  authBox: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    padding: "40px 24px",
+    gap: 16,
+  },
+  authInput: {
+    background: "rgba(255,255,255,0.08)",
+    border: "1px solid rgba(255,255,255,0.2)",
+    color: "#fff",
+    padding: "14px 16px",
+    borderRadius: 12,
+    fontSize: 16,
+    width: "100%",
+    maxWidth: 300,
+    outline: "none",
+    textAlign: "center",
+    letterSpacing: 4,
+  },
+  tabs: {
+    display: "flex",
+    margin: "0 16px 16px",
+    gap: 6,
+  },
+  tab: {
+    flex: 1,
+    padding: "10px 4px",
+    background: "rgba(255,255,255,0.05)",
+    border: "1px solid rgba(255,255,255,0.1)",
+    color: "rgba(255,255,255,0.5)",
+    borderRadius: 10,
+    cursor: "pointer",
+    fontSize: 12,
+    fontWeight: 600,
+  },
+  tabActive: {
+    background: "rgba(102,126,234,0.3)",
+    border: "1px solid rgba(102,126,234,0.5)",
+    color: "#fff",
+  },
+  tabContent: {
+    padding: "0 16px",
+  },
+  sectionTitle: {
+    color: "rgba(255,255,255,0.6)",
+    fontSize: 13,
+    fontWeight: 700,
+    marginBottom: 12,
+    textTransform: "uppercase",
+    letterSpacing: 1,
+  },
+  qrInfo: {
+    background: "rgba(102,126,234,0.15)",
+    border: "1px solid rgba(102,126,234,0.3)",
+    borderRadius: 10,
+    padding: "10px 14px",
+    fontSize: 12,
+    color: "rgba(255,255,255,0.6)",
+    marginBottom: 12,
+    lineHeight: 1.6,
+  },
+  adminCard: {
+    background: "rgba(255,255,255,0.05)",
+    borderRadius: 14,
+    padding: "14px",
+    marginBottom: 8,
+    border: "1px solid rgba(255,255,255,0.08)",
+  },
+  adminRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+  },
+  editForm: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  },
+  adminInput: {
+    background: "rgba(255,255,255,0.08)",
+    border: "1px solid rgba(255,255,255,0.15)",
+    color: "#fff",
+    padding: "10px 12px",
+    borderRadius: 10,
+    fontSize: 14,
+    width: "100%",
+    outline: "none",
+  },
+  btnEdit: {
+    background: "rgba(102,126,234,0.3)",
+    border: "none",
+    color: "#fff",
+    padding: "6px 12px",
+    borderRadius: 8,
+    cursor: "pointer",
+    fontSize: 12,
+    fontWeight: 600,
+  },
+  btnDel: {
+    background: "rgba(248,113,113,0.2)",
+    border: "none",
+    color: "#f87171",
+    padding: "6px 12px",
+    borderRadius: 8,
+    cursor: "pointer",
+    fontSize: 12,
+    fontWeight: 600,
+  },
+  btnSave: {
+    background: "linear-gradient(135deg,#667eea,#764ba2)",
+    border: "none",
+    color: "#fff",
+    padding: "10px 16px",
+    borderRadius: 10,
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: 14,
+  },
+  btnCancel: {
+    background: "rgba(255,255,255,0.1)",
+    border: "none",
+    color: "#fff",
+    padding: "10px 16px",
+    borderRadius: 10,
+    cursor: "pointer",
+    fontSize: 14,
+  },
+  stockRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+  },
+  stockBtn: {
+    background: "rgba(255,255,255,0.1)",
+    border: "none",
+    color: "#fff",
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    cursor: "pointer",
+    fontSize: 18,
+    fontWeight: 700,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stockNum: {
+    color: "#fff",
+    fontSize: 18,
+    fontWeight: 700,
+    minWidth: 40,
+    textAlign: "center",
+  },
+  statsRow: {
+    display: "flex",
+    gap: 10,
+    marginBottom: 16,
+  },
+  statBox: {
+    flex: 1,
+    background: "rgba(255,255,255,0.05)",
+    borderRadius: 12,
+    padding: "14px 8px",
+    textAlign: "center",
+    border: "1px solid rgba(255,255,255,0.08)",
+  },
+  statNum: {
+    fontSize: 28,
+    fontWeight: 900,
+    color: "#fff",
+  },
+  statLabel: {
+    color: "rgba(255,255,255,0.4)",
+    fontSize: 11,
+    marginTop: 2,
+  },
+  stampChip: {
+    background: "rgba(102,126,234,0.3)",
+    borderRadius: 6,
+    padding: "3px 7px",
+    fontSize: 14,
+    display: "inline-block",
+  },
+  // Toast
+  toast: {
+    position: "fixed",
+    top: 16,
+    left: "50%",
+    transform: "translateX(-50%)",
+    background: "linear-gradient(135deg,#667eea,#764ba2)",
+    color: "#fff",
+    padding: "12px 20px",
+    borderRadius: 24,
+    fontSize: 14,
+    fontWeight: 700,
+    zIndex: 9999,
+    whiteSpace: "nowrap",
+    boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+    animation: "fadeInDown 0.3s ease",
+  },
+  toastWarn: {
+    background: "linear-gradient(135deg,#f6d365,#fda085)",
+    color: "#000",
+  },
+  toastError: {
+    background: "linear-gradient(135deg,#f5576c,#f093fb)",
+  },
+};
+
+// ==================== GLOBAL STYLES ====================
+const globalCSS = `
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;600;700;900&display=swap');
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0f0c29; }
+  option { background: #302b63; color: #fff; }
+  @keyframes scanLine {
+    0% { top: 0%; } 50% { top: 100%; } 100% { top: 0%; }
+  }
+  @keyframes confettiFall {
+    0% { transform: translateY(0) rotate(0deg); opacity: 1; }
+    100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
+  }
+  @keyframes fadeInDown {
+    from { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+    to { opacity: 1; transform: translateX(-50%) translateY(0); }
+  }
+  @keyframes stampBounce {
+    0%   { transform: scale(0.3) rotate(-15deg); opacity: 0; }
+    40%  { transform: scale(1.18) rotate(4deg);  opacity: 1; }
+    65%  { transform: scale(0.92) rotate(-2deg); }
+    80%  { transform: scale(1.05) rotate(1deg);  }
+    100% { transform: scale(1)    rotate(0deg);  opacity: 1; }
+  }
+  @keyframes inkSpread {
+    0%   { transform: scale(0.2); opacity: 0.8; }
+    60%  { transform: scale(1.1); opacity: 0.5; }
+    100% { transform: scale(1);   opacity: 0.6; }
+  }
+`;
+
+const styleEl = document.createElement("style");
+styleEl.textContent = globalCSS;
+document.head.appendChild(styleEl);
