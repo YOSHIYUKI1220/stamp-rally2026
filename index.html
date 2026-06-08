@@ -18,39 +18,21 @@
 </head>
 <body>
   <div id="root"></div>
+
+  <!-- React 18 (UMD: window.React, window.ReactDOM が使える) -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <!-- Babel standalone (JSX → JS 変換) -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- QRコード読み取り -->
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+  <!-- QRコード生成（管理画面用） -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
-  <script>
-    try {
-      const _app = firebase.initializeApp({
-        apiKey:            "AIzaSyDlN3hEQXcY1Uo-JVpybOycmFF3C6--N-Y",
-        authDomain:        "stamp-rally2026.firebaseapp.com",
-        databaseURL:       "https://stamp-rally2026-default-rtdb.asia-southeast1.firebasedatabase.app",
-        projectId:         "stamp-rally2026",
-        storageBucket:     "stamp-rally2026.firebasestorage.app",
-        messagingSenderId: "362208550256",
-        appId:             "1:362208550256:web:d2cc3fbeb4204807c3c3b5"
-      });
-      window._db = firebase.database(_app);
-    } catch(e) {
-      console.error("Firebase初期化エラー:", e.message);
-      window._db = null;
-    }
-  </script>
+
   <script type="text/babel">
+    // React hooksをグローバルから取り出す（import不要）
     const { useState, useEffect, useRef, useCallback } = React;
-    const lsGet = (k,fb=null) => { try{return JSON.parse(localStorage.getItem(k))??fb;}catch{return fb;} };
-    const lsSet = (k,v) => { try{localStorage.setItem(k,JSON.stringify(v));}catch{} };
-    function getUserId() {
-      let id=localStorage.getItem("sr_uid");
-      if(!id){id="u_"+Date.now()+"_"+Math.random().toString(36).slice(2,8);localStorage.setItem("sr_uid",id);}
-      return id;
-    }
+
 // ==================== CONFIG ====================
 const ADMIN_PASSWORD = "admin2024";
 
@@ -81,13 +63,32 @@ const DEFAULT_PRIZES = [
 ];
 
 // ==================== STORAGE UTILS ====================
-// 個人データ用 localStorage ヘルパー
-const lsGet = (k, fb=null) => { try { return JSON.parse(localStorage.getItem(k))??fb; } catch { return fb; } };
-const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+const STORAGE_KEYS = {
+  USER_STAMPS: "sr_user_stamps",
+  USER_PRIZE: "sr_user_prize",
+  USER_CLAIMED: "sr_user_claimed",
+  BOOTHS: "sr_booths",
+  PRIZES: "sr_prizes",
+  VISITORS: "sr_visitors",
+  PRIZE_CLAIMS: "sr_prize_claims",
+  EVENT_NAME: "sr_event_name",
+};
+
+const storage = {
+  get: (key, fallback = null) => {
+    try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+  },
+  set: (key, value) => {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  },
+};
 
 function getUserId() {
   let id = localStorage.getItem("sr_uid");
-  if (!id) { id="u_"+Date.now()+"_"+Math.random().toString(36).slice(2,8); localStorage.setItem("sr_uid",id); }
+  if (!id) {
+    id = "u_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+    localStorage.setItem("sr_uid", id);
+  }
   return id;
 }
 
@@ -416,61 +417,69 @@ const camStyles = {
 
 // ==================== MAIN APP ====================
 function StampRallyApp() {
-  const [page,         setPage]        = useState("home");
-  const [booths,       setBooths]      = useState(DEFAULT_BOOTHS);
-  const [prizes,       setPrizes]      = useState(DEFAULT_PRIZES);
-  const [eventName,    setEventName]   = useState("学園祭2024");
-  const [stamps,       setStamps]      = useState(() => lsGet("sr_stamps", []));
-  const [userPrize,    setUserPrize]   = useState(() => lsGet("sr_prize",  null));
-  const [claimed,      setClaimed]     = useState(() => lsGet("sr_claimed", false));
-  const [toast,        setToast]       = useState(null);
-  const [newlyStamped, setNewlyStamped]= useState(null);
-  const [loading,      setLoading]     = useState(true);
+  const [page, setPage] = useState("home"); // home | scan | list | complete | admin | staff
+  const [booths, setBooths] = useState(() => storage.get(STORAGE_KEYS.BOOTHS, DEFAULT_BOOTHS));
+  const [prizes, setPrizes] = useState(() => storage.get(STORAGE_KEYS.PRIZES, DEFAULT_PRIZES));
+  const [stamps, setStamps] = useState(() => storage.get(STORAGE_KEYS.USER_STAMPS, []));
+  const [userPrize, setUserPrize] = useState(() => storage.get(STORAGE_KEYS.USER_PRIZE, null));
+  const [claimed, setClaimed] = useState(() => storage.get(STORAGE_KEYS.USER_CLAIMED, false));
+  const [toast, setToast] = useState(null);
+  const [adminMode, setAdminMode] = useState(false);
+  const [newlyStamped, setNewlyStamped] = useState(null);
+  const [eventName, setEventName] = useState(() => storage.get(STORAGE_KEYS.EVENT_NAME, "学園祭2024"));
   const userId = useRef(getUserId()).current;
 
+  // Persist
+  useEffect(() => { storage.set(STORAGE_KEYS.BOOTHS, booths); }, [booths]);
+  useEffect(() => { storage.set(STORAGE_KEYS.PRIZES, prizes); }, [prizes]);
+  useEffect(() => { storage.set(STORAGE_KEYS.USER_STAMPS, stamps); }, [stamps]);
+  useEffect(() => { storage.set(STORAGE_KEYS.USER_PRIZE, userPrize); }, [userPrize]);
+  useEffect(() => { storage.set(STORAGE_KEYS.USER_CLAIMED, claimed); }, [claimed]);
+  useEffect(() => { storage.set(STORAGE_KEYS.EVENT_NAME, eventName); }, [eventName]);
+
+  // Load jsQR
   useEffect(() => {
-    const db = window._db;
-    if (!db) { setLoading(false); return; }
-    db.ref("booths").once("value").then(s => { if (!s.val()) db.ref("booths").set(DEFAULT_BOOTHS); });
-    db.ref("prizes").once("value").then(s => { if (!s.val()) db.ref("prizes").set(DEFAULT_PRIZES); });
-    db.ref("eventName").once("value").then(s => { if (!s.val()) db.ref("eventName").set("学園祭2024"); });
-    const r1 = db.ref("booths");
-    const r2 = db.ref("prizes");
-    const r3 = db.ref("eventName");
-    r1.on("value", s => { const v=s.val(); if(v) setBooths(Array.isArray(v)?v:Object.values(v)); });
-    r2.on("value", s => { const v=s.val(); if(v) setPrizes(Array.isArray(v)?v:Object.values(v)); });
-    r3.on("value", s => { const v=s.val(); if(v) setEventName(v); });
-    setTimeout(() => setLoading(false), 1000);
-    return () => { r1.off(); r2.off(); r3.off(); };
+    if (!window.jsQR) {
+      const s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js";
+      document.head.appendChild(s);
+    }
   }, []);
 
-  useEffect(() => { lsSet("sr_stamps",  stamps);   }, [stamps]);
-  useEffect(() => { lsSet("sr_prize",   userPrize); }, [userPrize]);
-  useEffect(() => { lsSet("sr_claimed", claimed);   }, [claimed]);
-
-  const showToast = (msg, type="success") => {
+  const showToast = (msg, type = "success") => {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 2800);
   };
 
   const handleStamp = (boothId) => {
-    if (stamps.includes(boothId)) { showToast("このスタンプはすでに押されています","warn"); return false; }
+    if (stamps.includes(boothId)) {
+      showToast("このスタンプはすでに押されています", "warn");
+      return false;
+    }
     const booth = booths.find(b => b.id === boothId);
-    if (!booth) { showToast("無効なQRコードです","error"); return false; }
+    if (!booth) {
+      showToast("無効なQRコードです", "error");
+      return false;
+    }
     const newStamps = [...stamps, boothId];
     setStamps(newStamps);
-    const db = window._db;
-    if (db) {
-      const now = Date.now();
-      if (!lsGet("sr_startedAt")) lsSet("sr_startedAt", now);
-      const data = { stamps:newStamps, startedAt:lsGet("sr_startedAt")||now };
-      if (newStamps.length === booths.length) data.completedAt = now;
-      db.ref("visitors/"+userId).set(data);
+
+    // Track visitor
+    const visitors = storage.get(STORAGE_KEYS.VISITORS, {});
+    if (!visitors[userId]) visitors[userId] = { stamps: [], startedAt: Date.now() };
+    visitors[userId].stamps = newStamps;
+    if (newStamps.length === booths.length) {
+      visitors[userId].completedAt = Date.now();
     }
-    showToast("「"+booth.name+"」のスタンプをゲット！","success");
+    storage.set(STORAGE_KEYS.VISITORS, visitors);
+
+    showToast(`「${booth.name}」のスタンプをゲット！`, "success");
+
+    // スタンプカードへ遷移してアニメーション表示
     setNewlyStamped(boothId);
     setPage("home");
     setTimeout(() => setNewlyStamped(null), 1200);
+
     if (newStamps.length === booths.length && !userPrize) {
       setTimeout(() => setPage("complete"), 1600);
     }
@@ -480,81 +489,80 @@ function StampRallyApp() {
   const handleComplete = () => {
     if (userPrize) return;
     const available = prizes.filter(p => p.stock > 0);
-    if (available.length === 0) { showToast("景品がなくなりました","error"); return; }
+    if (available.length === 0) { showToast("景品がなくなりました", "error"); return; }
     const prize = available[Math.floor(Math.random() * available.length)];
-    const db = window._db;
-    if (db) {
-      db.ref("prizes").transaction(cur => {
-        if (!cur) return cur;
-        const arr = Array.isArray(cur)?cur:Object.values(cur);
-        const i = arr.findIndex(p=>p.id===prize.id);
-        if (i===-1||arr[i].stock<=0) return;
-        arr[i]={...arr[i],stock:arr[i].stock-1};
-        return arr;
-      }).then(()=>setUserPrize(prize)).catch(()=>setUserPrize(prize));
-    } else { setUserPrize(prize); }
+    setUserPrize(prize);
+    const updated = prizes.map(p => p.id === prize.id ? { ...p, stock: p.stock - 1 } : p);
+    setPrizes(updated);
   };
 
   const handleClaim = () => {
     if (claimed || !userPrize) return;
     setClaimed(true);
-    const db = window._db;
-    if (db) {
-      db.ref("claims").push({ userId, prize:userPrize, claimedAt:Date.now() });
-      db.ref("visitors/"+userId+"/claimed").set(true);
-    }
+    // Record claim
+    const claims = storage.get(STORAGE_KEYS.PRIZE_CLAIMS, []);
+    claims.push({ userId, prize: userPrize, claimedAt: Date.now() });
+    storage.set(STORAGE_KEYS.PRIZE_CLAIMS, claims);
+    const visitors = storage.get(STORAGE_KEYS.VISITORS, {});
+    if (visitors[userId]) visitors[userId].claimed = true;
+    storage.set(STORAGE_KEYS.VISITORS, visitors);
   };
 
-  const updateBooths    = v => { setBooths(v);     if(window._db) window._db.ref("booths").set(v); };
-  const updatePrizes    = v => { setPrizes(v);     if(window._db) window._db.ref("prizes").set(v); };
-  const updateEventName = v => { setEventName(v);  if(window._db) window._db.ref("eventName").set(v); };
-
-  const completed = stamps.length > 0 && stamps.length === booths.length;
-  const progress  = booths.length > 0 ? stamps.length / booths.length : 0;
-
-  if (loading) return (
-    <div style={{minHeight:"100dvh",display:"flex",flexDirection:"column",alignItems:"center",
-      justifyContent:"center",background:"linear-gradient(160deg,#0f0c29,#302b63,#24243e)",gap:16}}>
-      <div style={{fontSize:60}}>🎪</div>
-      <div style={{color:"rgba(255,255,255,0.7)",fontSize:16,fontWeight:700}}>読み込み中...</div>
-      <div style={{width:44,height:44,border:"4px solid rgba(255,255,255,0.1)",
-        borderTop:"4px solid #667eea",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
-    </div>
-  );
+  const completed = stamps.length === booths.length;
+  const progress = booths.length > 0 ? stamps.length / booths.length : 0;
 
   return (
     <div style={styles.app}>
+      {/* Toast */}
       {toast && (
-        <div style={{...styles.toast,
-          ...(toast.type==="warn"?styles.toastWarn:toast.type==="error"?styles.toastError:{})}}>
-          {toast.type==="success"?"✓ ":toast.type==="warn"?"⚠ ":"✗ "}{toast.msg}
+        <div style={{ ...styles.toast, ...(toast.type === "warn" ? styles.toastWarn : toast.type === "error" ? styles.toastError : {}) }}>
+          {toast.type === "success" ? "✓ " : toast.type === "warn" ? "⚠ " : "✗ "}{toast.msg}
         </div>
       )}
-      {page==="home" && (
-        <HomePage booths={booths} stamps={stamps} progress={progress} completed={completed}
-          onScan={()=>setPage("scan")} onComplete={()=>setPage("complete")}
-          onAdmin={()=>setPage("admin")} userPrize={userPrize} claimed={claimed}
-          newlyStamped={newlyStamped} eventName={eventName} />
+
+      {/* Pages */}
+      {page === "home" && (
+        <HomePage
+          booths={booths} stamps={stamps} progress={progress} completed={completed}
+          onScan={() => setPage("scan")} onList={() => setPage("list")}
+          onComplete={() => setPage("complete")} onAdmin={() => setPage("admin")}
+          userPrize={userPrize} claimed={claimed} newlyStamped={newlyStamped} eventName={eventName}
+        />
       )}
-      {page==="scan" && (
-        <ScanPage booths={booths} stamps={stamps} onScan={handleStamp} onBack={()=>setPage("home")} />
+      {page === "scan" && (
+        <ScanPage
+          booths={booths} stamps={stamps}
+          onScan={handleStamp} onBack={() => setPage("home")}
+        />
       )}
-      {page==="complete" && (
-        <CompletePage userPrize={userPrize} claimed={claimed}
-          onGetPrize={handleComplete} onClaim={handleClaim} onBack={()=>setPage("home")} />
+      {page === "list" && (
+        <ListPage booths={booths} stamps={stamps} onBack={() => setPage("home")} newlyStamped={newlyStamped} />
       )}
-      {page==="admin" && (
-        <AdminPage booths={booths} setBooths={updateBooths}
-          prizes={prizes} setPrizes={updatePrizes}
-          eventName={eventName} setEventName={updateEventName}
-          onBack={()=>setPage("home")} onStaff={()=>setPage("staff")} />
+      {page === "complete" && (
+        <CompletePage
+          userPrize={userPrize} claimed={claimed}
+          onGetPrize={handleComplete} onClaim={handleClaim}
+          onBack={() => setPage("home")}
+        />
       )}
-      {page==="staff" && <StaffPage onBack={()=>setPage("admin")} />}
+      {page === "admin" && (
+        <AdminPage
+          booths={booths} setBooths={setBooths}
+          prizes={prizes} setPrizes={setPrizes}
+          onBack={() => setPage("home")}
+          onStaff={() => setPage("staff")}
+          eventName={eventName} setEventName={setEventName}
+        />
+      )}
+      {page === "staff" && (
+        <StaffPage onBack={() => setPage("admin")} prizes={prizes} />
+      )}
     </div>
   );
 }
+
 // ==================== HOME PAGE ====================
-function HomePage({ booths, stamps, progress, completed, onScan, onList, onComplete, onAdmin, userPrize, claimed, newlyStamped }) {
+function HomePage({ booths, stamps, progress, completed, onScan, onList, onComplete, onAdmin, userPrize, claimed, newlyStamped, eventName }) {
   const pct  = Math.round(progress * 100);
   const got  = stamps.length;
   const total = booths.length;
@@ -854,22 +862,6 @@ function ScanPage({ booths, stamps, onScan, onBack }) {
             </div>
           </div>
           <p style={styles.scanHint}>ブースのQRコードをカメラに向けてください</p>
-          <div style={styles.manualSection}>
-            <p style={{ color: "rgba(255,255,255,0.4)", fontSize: 11, textAlign: "center", marginBottom: 8 }}>
-              ─ テスト用手動入力 ─
-            </p>
-            <div style={styles.manualRow}>
-              <select value={manualId} onChange={e => setManualId(e.target.value)} style={styles.manualSelect}>
-                <option value="">ブースを選択...</option>
-                {booths.map(b => (
-                  <option key={b.id} value={b.id} disabled={stamps.includes(b.id)}>
-                    {b.icon} {b.name}{stamps.includes(b.id) ? " ✓" : ""}
-                  </option>
-                ))}
-              </select>
-              <button style={styles.manualBtn} onClick={handleManual}>取得</button>
-            </div>
-          </div>
         </>
       )}
     </div>
@@ -1297,13 +1289,15 @@ function AdminPage({ booths, setBooths, prizes, setPrizes, onBack, onStaff, even
             if (pw === ADMIN_PASSWORD) setAuthed(true);
             else { alert("パスワードが違います"); setPw(""); }
           }}>ログイン</button>
-          <p style={{ color: "rgba(255,255,255,0.3)", fontSize: 11, marginTop: 12 }}>
-            デフォルト: admin2024
-          </p>
+
         </div>
       </div>
     );
   }
+
+  const visitors = storage.get(STORAGE_KEYS.VISITORS, {});
+  const claims = storage.get(STORAGE_KEYS.PRIZE_CLAIMS, []);
+  const visitorList = Object.entries(visitors);
 
   return (
     <div style={styles.page}>
@@ -1317,7 +1311,7 @@ function AdminPage({ booths, setBooths, prizes, setPrizes, onBack, onStaff, even
       <div style={styles.tabs}>
         {["booths","prizes","visitors","settings"].map(t => (
           <button key={t} style={{ ...styles.tab, ...(tab === t ? styles.tabActive : {}) }} onClick={() => setTab(t)}>
-            {t==="booths"?"🏛 ブース":t==="prizes"?"🎁 景品":t==="visitors"?"👥 来場者":"⚙️ 設定"}
+            {t === "booths" ? "🏛 ブース" : t === "prizes" ? "🎁 景品" : t === "visitors" ? "👥 来場者" : "⚙️ 設定"}
           </button>
         ))}
       </div>
@@ -1426,11 +1420,351 @@ function AdminPage({ booths, setBooths, prizes, setPrizes, onBack, onStaff, even
       )}
 
       {/* ── VISITORS TAB ── */}
-      {tab === "visitors" && <VisitorsTab booths={booths} />}
-      {tab === "settings" && <SettingsTab eventName={eventName} setEventName={setEventName} />}
+      {tab === "visitors" && (
+        <VisitorsTab booths={booths} visitorList={visitorList} claims={claims} />
+      )}
+
+      {/* ── SETTINGS TAB ── */}
+      {tab === "settings" && (
+        <SettingsTab eventName={eventName} setEventName={setEventName} />
+      )}
     </div>
   );
 }
+
+// ── 設定タブ ──
+function SettingsTab({ eventName, setEventName }) {
+  const [done, setDone] = React.useState(false);
+  const [step, setStep] = React.useState(0);
+  const [nameInput, setNameInput] = React.useState(eventName);
+  const [nameSaved, setNameSaved] = React.useState(false);
+
+  const saveEventName = () => {
+    if (!nameInput.trim()) return;
+    setEventName(nameInput.trim());
+    setNameSaved(true);
+    setTimeout(() => setNameSaved(false), 2000);
+  };
+
+  const resetMyData = () => {
+    localStorage.removeItem(STORAGE_KEYS.USER_STAMPS);
+    localStorage.removeItem(STORAGE_KEYS.USER_PRIZE);
+    localStorage.removeItem(STORAGE_KEYS.USER_CLAIMED);
+    localStorage.removeItem("sr_uid");
+    setDone(true);
+    setTimeout(() => window.location.reload(), 1200);
+  };
+
+  return (
+    <div style={styles.tabContent}>
+      <h3 style={styles.sectionTitle}>イベント設定</h3>
+      <div style={styles.adminCard}>
+        <div style={{ color: "#fff", fontWeight: 700, fontSize: 15, marginBottom: 6 }}>
+          🎪 イベント名
+        </div>
+        <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, marginBottom: 10 }}>
+          ホーム画面のバッジに表示される名前を変更できます
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input
+            value={nameInput}
+            onChange={e => setNameInput(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && saveEventName()}
+            style={{ ...styles.adminInput, flex: 1 }}
+            placeholder="例：文化祭2025"
+            maxLength={20}
+          />
+          <button
+            style={{ ...styles.btnSave, padding: "10px 14px", fontSize: 13, whiteSpace: "nowrap" }}
+            onClick={saveEventName}>
+            保存
+          </button>
+        </div>
+        {nameSaved && (
+          <div style={{ color: "#4ade80", fontSize: 12, marginTop: 8, textAlign: "center" }}>
+            ✅ 保存しました
+          </div>
+        )}
+        <div style={{ marginTop: 10, background: "rgba(255,255,255,0.04)", borderRadius: 8,
+          padding: "8px 12px", display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>プレビュー：</span>
+          <span style={{ background: "linear-gradient(135deg,#f093fb,#f5576c)", padding: "3px 12px",
+            borderRadius: 20, fontSize: 12, fontWeight: 700, color: "#fff" }}>
+            🎪 {nameInput || "（未入力）"}
+          </span>
+        </div>
+      </div>
+
+      <h3 style={{ ...styles.sectionTitle, marginTop: 16 }}>テスト・デバッグ</h3>
+      <div style={styles.adminCard}>
+        <div style={{ color: "#fff", fontWeight: 700, fontSize: 15, marginBottom: 6 }}>
+          🔄 自分のスタンプをリセット
+        </div>
+        <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 13, lineHeight: 1.6, marginBottom: 12 }}>
+          このスマホのスタンプ・景品・受取記録をすべて削除します。動作テストや再試行のときに使用してください。
+        </div>
+        {done ? (
+          <div style={{ textAlign: "center", color: "#4ade80", fontWeight: 700, fontSize: 14, padding: "12px",
+            background: "rgba(74,222,128,0.1)", borderRadius: 10, border: "1px solid rgba(74,222,128,0.3)" }}>
+            ✅ リセット完了。再読み込み中...
+          </div>
+        ) : step === 0 ? (
+          <button style={{ width: "100%", padding: "12px", background: "rgba(251,191,36,0.15)",
+            border: "1px solid rgba(251,191,36,0.4)", borderRadius: 12, color: "#fbbf24",
+            fontSize: 14, fontWeight: 700, cursor: "pointer" }}
+            onClick={() => setStep(1)}>
+            リセットする
+          </button>
+        ) : (
+          <div style={{ background: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.3)",
+            borderRadius: 12, padding: "14px" }}>
+            <p style={{ color: "#fde68a", fontSize: 13, lineHeight: 1.6, marginBottom: 12, textAlign: "center" }}>
+              本当にリセットしますか？この操作は取り消せません。
+            </p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button style={{ flex: 1, padding: "10px", background: "linear-gradient(135deg,#f59e0b,#d97706)",
+                border: "none", borderRadius: 10, color: "#000", fontWeight: 700, fontSize: 13, cursor: "pointer" }}
+                onClick={resetMyData}>
+                はい、リセット
+              </button>
+              <button style={{ flex: 1, padding: "10px", background: "rgba(255,255,255,0.08)",
+                border: "none", borderRadius: 10, color: "#fff", fontSize: 13, cursor: "pointer" }}
+                onClick={() => setStep(0)}>
+                キャンセル
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+      <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)",
+        borderRadius: 12, padding: "14px", marginTop: 12 }}>
+        <div style={{ fontWeight: 700, marginBottom: 6, color: "rgba(255,255,255,0.6)" }}>💡 ご注意</div>
+        <div style={{ color: "rgba(255,255,255,0.4)", fontSize: 12, lineHeight: 1.9 }}>
+          <div>• リセットされるのはこのスマホのデータだけです</div>
+          <div>• 他の来場者のデータは消えません</div>
+          <div>• 管理者画面「来場者」タブから個別削除もできます</div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── 来場者タブ（分離コンポーネント） ──
+function VisitorsTab({ booths, visitorList, claims }) {
+  const [list, setList] = React.useState(visitorList);
+  const [confirmAll, setConfirmAll] = React.useState(false);
+
+  // ストレージから最新を読み直す
+  React.useEffect(() => {
+    setList(Object.entries(storage.get(STORAGE_KEYS.VISITORS, {})));
+  }, []);
+
+  const completedList = list.filter(([, v]) => v.stamps?.length === booths.length);
+
+  // 個別削除
+  const deleteOne = (uid) => {
+    const visitors = storage.get(STORAGE_KEYS.VISITORS, {});
+    delete visitors[uid];
+    storage.set(STORAGE_KEYS.VISITORS, visitors);
+    setList(Object.entries(visitors));
+  };
+
+  // 全削除
+  const deleteAll = () => {
+    storage.set(STORAGE_KEYS.VISITORS, {});
+    storage.set(STORAGE_KEYS.PRIZE_CLAIMS, []);
+    setList([]);
+    setConfirmAll(false);
+  };
+
+  return (
+    <div style={styles.tabContent}>
+      {/* 統計カード */}
+      <div style={styles.statsRow}>
+        <div style={styles.statBox}>
+          <div style={styles.statNum}>{list.length}</div>
+          <div style={styles.statLabel}>参加者数</div>
+        </div>
+        <div style={styles.statBox}>
+          <div style={styles.statNum}>{completedList.length}</div>
+          <div style={styles.statLabel}>コンプリート</div>
+        </div>
+        <div style={styles.statBox}>
+          <div style={styles.statNum}>{claims.length}</div>
+          <div style={styles.statLabel}>景品受取済</div>
+        </div>
+      </div>
+
+      {/* 全削除ボタン */}
+      {list.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          {!confirmAll ? (
+            <button style={visitorStyles.btnDeleteAll} onClick={() => setConfirmAll(true)}>
+              🗑️　来場者データをすべて削除
+            </button>
+          ) : (
+            <div style={visitorStyles.confirmAllBox}>
+              <p style={visitorStyles.confirmAllText}>
+                ⚠️ 全来場者データと景品受取記録を削除します。<br />この操作は取り消せません。
+              </p>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button style={visitorStyles.btnDeleteConfirm} onClick={deleteAll}>削除する</button>
+                <button style={visitorStyles.btnDeleteCancel} onClick={() => setConfirmAll(false)}>キャンセル</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 来場者リスト */}
+      {list.length === 0 ? (
+        <p style={{ color: "rgba(255,255,255,0.3)", textAlign: "center", marginTop: 40 }}>来場者データなし</p>
+      ) : (
+        list.map(([uid, v]) => {
+          const isComplete = v.stamps?.length === booths.length;
+          const completedAt = v.completedAt
+            ? new Date(v.completedAt).toLocaleString("ja-JP", { month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" })
+            : null;
+          const startedAt = v.startedAt
+            ? new Date(v.startedAt).toLocaleString("ja-JP", { month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" })
+            : null;
+          return (
+            <div key={uid} style={styles.adminCard}>
+              <div style={styles.adminRow}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  {/* ステータスバッジ */}
+                  <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+                    {isComplete && <span style={visitorStyles.badgeComplete}>🎉 完了</span>}
+                    {v.claimed  && <span style={visitorStyles.badgeClaimed}>🎁 受取済</span>}
+                    {!isComplete && <span style={visitorStyles.badgeProgress}>{v.stamps?.length || 0}/{booths.length} 箇所</span>}
+                  </div>
+                  {/* スタンプ絵文字 */}
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginBottom: 6 }}>
+                    {booths.map(b => {
+                      const got = (v.stamps || []).includes(b.id);
+                      return (
+                        <span key={b.id} style={{ fontSize: 16, opacity: got ? 1 : 0.15 }}>
+                          {b.icon}
+                        </span>
+                      );
+                    })}
+                  </div>
+                  {/* 時刻情報 */}
+                  <div style={visitorStyles.timeRow}>
+                    {startedAt   && <span>🕐 開始 {startedAt}</span>}
+                    {completedAt && <span>✅ 完了 {completedAt}</span>}
+                  </div>
+                  {/* UID */}
+                  <div style={{ color: "rgba(255,255,255,0.2)", fontSize: 10, marginTop: 4 }}>{uid}</div>
+                </div>
+                {/* 個別削除ボタン */}
+                <button
+                  style={visitorStyles.btnDeleteOne}
+                  onClick={() => { if (window.confirm("この来場者データを削除しますか？")) deleteOne(uid); }}
+                >🗑</button>
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+const visitorStyles = {
+  btnDeleteAll: {
+    width: "100%",
+    padding: "10px",
+    background: "rgba(248,113,113,0.12)",
+    border: "1px solid rgba(248,113,113,0.35)",
+    borderRadius: 12,
+    color: "#f87171",
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  confirmAllBox: {
+    background: "rgba(248,113,113,0.1)",
+    border: "1px solid rgba(248,113,113,0.4)",
+    borderRadius: 12,
+    padding: "14px",
+  },
+  confirmAllText: {
+    color: "#fca5a5",
+    fontSize: 13,
+    lineHeight: 1.6,
+    marginBottom: 12,
+  },
+  btnDeleteConfirm: {
+    flex: 1,
+    padding: "10px",
+    background: "linear-gradient(135deg,#ef4444,#dc2626)",
+    border: "none",
+    borderRadius: 10,
+    color: "#fff",
+    fontWeight: 700,
+    fontSize: 13,
+    cursor: "pointer",
+  },
+  btnDeleteCancel: {
+    flex: 1,
+    padding: "10px",
+    background: "rgba(255,255,255,0.08)",
+    border: "none",
+    borderRadius: 10,
+    color: "#fff",
+    fontSize: 13,
+    cursor: "pointer",
+  },
+  btnDeleteOne: {
+    background: "rgba(248,113,113,0.15)",
+    border: "1px solid rgba(248,113,113,0.3)",
+    borderRadius: 8,
+    color: "#f87171",
+    fontSize: 16,
+    width: 36,
+    height: 36,
+    cursor: "pointer",
+    flexShrink: 0,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  badgeComplete: {
+    background: "rgba(74,222,128,0.2)",
+    border: "1px solid rgba(74,222,128,0.4)",
+    color: "#4ade80",
+    borderRadius: 6,
+    padding: "2px 8px",
+    fontSize: 11,
+    fontWeight: 700,
+  },
+  badgeClaimed: {
+    background: "rgba(251,191,36,0.2)",
+    border: "1px solid rgba(251,191,36,0.4)",
+    color: "#fbbf24",
+    borderRadius: 6,
+    padding: "2px 8px",
+    fontSize: 11,
+    fontWeight: 700,
+  },
+  badgeProgress: {
+    background: "rgba(255,255,255,0.08)",
+    border: "1px solid rgba(255,255,255,0.15)",
+    color: "rgba(255,255,255,0.5)",
+    borderRadius: 6,
+    padding: "2px 8px",
+    fontSize: 11,
+    fontWeight: 600,
+  },
+  timeRow: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+    color: "rgba(255,255,255,0.35)",
+    fontSize: 11,
+  },
+};
 
 function AddPrizeForm({ prizes, setPrizes }) {
   const [form, setForm] = useState({ name: "", icon: "🎁", stock: 10 });
@@ -1494,19 +1828,14 @@ function QRDisplay({ boothId }) {
   );
 }
 
-// ==================== STAFF PAGE (Firebase) ====================
-function StaffPage({ onBack }) {
-  const [claims, setClaims] = useState([]);
-  useEffect(() => {
-    const db = window._db;
-    if (!db) return;
-    const r = db.ref("claims");
-    r.on("value", s => {
-      const val = s.val();
-      setClaims(val ? Object.values(val).sort((a,b)=>b.claimedAt-a.claimedAt) : []);
-    });
-    return () => r.off();
-  }, []);
+// ==================== STAFF PAGE ====================
+function StaffPage({ onBack, prizes }) {
+  const claims = storage.get(STORAGE_KEYS.PRIZE_CLAIMS, []);
+  const visitors = storage.get(STORAGE_KEYS.VISITORS, {});
+
+  // Find users who claimed but pending staff check
+  const pending = Object.entries(visitors).filter(([, v]) => v.claimed);
+
   return (
     <div style={styles.page}>
       <div style={styles.pageHeader}>
@@ -1514,174 +1843,28 @@ function StaffPage({ onBack }) {
         <h2 style={styles.pageTitle}>スタッフ確認</h2>
         <div />
       </div>
+
       <div style={styles.tabContent}>
         <h3 style={styles.sectionTitle}>景品受取記録 ({claims.length}件)</h3>
         {claims.length === 0 ? (
-          <p style={{color:"rgba(255,255,255,0.3)",textAlign:"center",marginTop:30}}>まだ景品受取なし</p>
-        ) : claims.map((c,i) => (
-          <div key={i} style={styles.adminCard}>
-            <div style={styles.adminRow}>
-              <span style={{fontSize:28}}>{c.prize?.icon}</span>
-              <div style={{flex:1}}>
-                <div style={{color:"#fff",fontWeight:600}}>{c.prize?.name}</div>
-                <div style={{color:"rgba(255,255,255,0.4)",fontSize:12}}>
-                  {new Date(c.claimedAt).toLocaleString("ja-JP")}
-                </div>
-              </div>
-              <span style={{...styles.stampChip,background:"#4ade80",color:"#000"}}>✓ 受取済</span>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ── 来場者タブ (Firebase版) ──
-function VisitorsTab({ booths }) {
-  const [list, setList]             = useState([]);
-  const [claims, setClaims]         = useState([]);
-  const [confirmAll, setConfirmAll] = useState(false);
-  useEffect(() => {
-    const db = window._db;
-    if (!db) return;
-    const r1 = db.ref("visitors");
-    const r2 = db.ref("claims");
-    r1.on("value", s => setList(s.val()?Object.entries(s.val()):[]) );
-    r2.on("value", s => setClaims(s.val()?Object.values(s.val()):[]) );
-    return () => { r1.off(); r2.off(); };
-  }, []);
-  const deleteOne = uid => { if(window._db) window._db.ref("visitors/"+uid).remove(); };
-  const deleteAll = () => {
-    if(window._db){ window._db.ref("visitors").remove(); window._db.ref("claims").remove(); }
-    setConfirmAll(false);
-  };
-  const completedList = list.filter(([,v])=>v.stamps?.length===booths.length);
-  const fmt = ts => ts ? new Date(ts).toLocaleString("ja-JP",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}) : null;
-  return (
-    <div style={styles.tabContent}>
-      <div style={styles.statsRow}>
-        <div style={styles.statBox}><div style={styles.statNum}>{list.length}</div><div style={styles.statLabel}>参加者数</div></div>
-        <div style={styles.statBox}><div style={styles.statNum}>{completedList.length}</div><div style={styles.statLabel}>コンプリート</div></div>
-        <div style={styles.statBox}><div style={styles.statNum}>{claims.length}</div><div style={styles.statLabel}>景品受取済</div></div>
-      </div>
-      {list.length > 0 && (
-        <div style={{marginBottom:12}}>
-          {!confirmAll ? (
-            <button onClick={()=>setConfirmAll(true)} style={{width:"100%",padding:"10px",
-              background:"rgba(248,113,113,0.12)",border:"1px solid rgba(248,113,113,0.35)",
-              borderRadius:12,color:"#f87171",fontSize:13,fontWeight:700,cursor:"pointer"}}>
-              🗑️　来場者データをすべて削除
-            </button>
-          ) : (
-            <div style={{background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.4)",borderRadius:12,padding:"14px"}}>
-              <p style={{color:"#fca5a5",fontSize:13,lineHeight:1.6,marginBottom:12}}>
-                ⚠️ 全来場者データと景品受取記録を削除します。この操作は取り消せません。
-              </p>
-              <div style={{display:"flex",gap:8}}>
-                <button onClick={deleteAll} style={{flex:1,padding:"10px",background:"linear-gradient(135deg,#ef4444,#dc2626)",border:"none",borderRadius:10,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>削除する</button>
-                <button onClick={()=>setConfirmAll(false)} style={{flex:1,padding:"10px",background:"rgba(255,255,255,0.08)",border:"none",borderRadius:10,color:"#fff",fontSize:13,cursor:"pointer"}}>キャンセル</button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-      {list.length===0 ? (
-        <p style={{color:"rgba(255,255,255,0.3)",textAlign:"center",marginTop:40}}>来場者データなし</p>
-      ) : list.map(([uid,v]) => {
-        const isComplete = v.stamps?.length===booths.length;
-        return (
-          <div key={uid} style={styles.adminCard}>
-            <div style={styles.adminRow}>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{display:"flex",gap:6,marginBottom:6,flexWrap:"wrap"}}>
-                  {isComplete && <span style={{background:"rgba(74,222,128,0.2)",border:"1px solid rgba(74,222,128,0.4)",color:"#4ade80",borderRadius:6,padding:"2px 8px",fontSize:11,fontWeight:700}}>🎉 完了</span>}
-                  {v.claimed  && <span style={{background:"rgba(251,191,36,0.2)",border:"1px solid rgba(251,191,36,0.4)",color:"#fbbf24",borderRadius:6,padding:"2px 8px",fontSize:11,fontWeight:700}}>🎁 受取済</span>}
-                  {!isComplete && <span style={{background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.15)",color:"rgba(255,255,255,0.5)",borderRadius:6,padding:"2px 8px",fontSize:11,fontWeight:600}}>{v.stamps?.length||0}/{booths.length} 箇所</span>}
-                </div>
-                <div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:6}}>
-                  {booths.map(b=><span key={b.id} style={{fontSize:16,opacity:(v.stamps||[]).includes(b.id)?1:0.15}}>{b.icon}</span>)}
-                </div>
-                <div style={{display:"flex",flexDirection:"column",gap:2,color:"rgba(255,255,255,0.35)",fontSize:11}}>
-                  {fmt(v.startedAt)   && <span>🕐 開始 {fmt(v.startedAt)}</span>}
-                  {fmt(v.completedAt) && <span>✅ 完了 {fmt(v.completedAt)}</span>}
-                </div>
-                <div style={{color:"rgba(255,255,255,0.2)",fontSize:10,marginTop:4}}>{uid}</div>
-              </div>
-              <button onClick={()=>{if(window.confirm("この来場者データを削除しますか？"))deleteOne(uid);}}
-                style={{background:"rgba(248,113,113,0.15)",border:"1px solid rgba(248,113,113,0.3)",
-                  borderRadius:8,color:"#f87171",fontSize:16,width:36,height:36,cursor:"pointer",
-                  flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>🗑</button>
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ── 設定タブ ──
-function SettingsTab({ eventName, setEventName }) {
-  const [done,      setDone]      = useState(false);
-  const [step,      setStep]      = useState(0);
-  const [nameInput, setNameInput] = useState(eventName);
-  const [nameSaved, setNameSaved] = useState(false);
-  const saveEventName = () => {
-    if (!nameInput.trim()) return;
-    setEventName(nameInput.trim());
-    setNameSaved(true);
-    setTimeout(() => setNameSaved(false), 2000);
-  };
-  const resetMyData = () => {
-    const uid = localStorage.getItem("sr_uid");
-    if (uid && window._db) window._db.ref("visitors/"+uid).remove();
-    ["sr_stamps","sr_prize","sr_claimed","sr_startedAt","sr_uid"].forEach(k=>localStorage.removeItem(k));
-    setDone(true);
-    setTimeout(() => window.location.reload(), 1200);
-  };
-  return (
-    <div style={styles.tabContent}>
-      <h3 style={styles.sectionTitle}>イベント設定</h3>
-      <div style={styles.adminCard}>
-        <div style={{color:"#fff",fontWeight:700,fontSize:15,marginBottom:6}}>🎪 イベント名</div>
-        <div style={{color:"rgba(255,255,255,0.45)",fontSize:12,marginBottom:10}}>ホーム画面のバッジに表示される名前を変更できます</div>
-        <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <input value={nameInput} onChange={e=>setNameInput(e.target.value)}
-            onKeyDown={e=>e.key==="Enter"&&saveEventName()}
-            style={{...styles.adminInput,flex:1}} placeholder="例：文化祭2025" maxLength={20}/>
-          <button style={{...styles.btnSave,padding:"10px 14px",fontSize:13,whiteSpace:"nowrap"}} onClick={saveEventName}>保存</button>
-        </div>
-        {nameSaved && <div style={{color:"#4ade80",fontSize:12,marginTop:8,textAlign:"center"}}>✅ 保存しました</div>}
-        <div style={{marginTop:10,background:"rgba(255,255,255,0.04)",borderRadius:8,padding:"8px 12px",display:"flex",alignItems:"center",gap:8}}>
-          <span style={{fontSize:11,color:"rgba(255,255,255,0.3)"}}>プレビュー：</span>
-          <span style={{background:"linear-gradient(135deg,#f093fb,#f5576c)",padding:"3px 12px",borderRadius:20,fontSize:12,fontWeight:700,color:"#fff"}}>🎪 {nameInput||"（未入力）"}</span>
-        </div>
-      </div>
-      <h3 style={{...styles.sectionTitle,marginTop:16}}>テスト・デバッグ</h3>
-      <div style={styles.adminCard}>
-        <div style={{color:"#fff",fontWeight:700,fontSize:15,marginBottom:6}}>🔄 自分のスタンプをリセット</div>
-        <div style={{color:"rgba(255,255,255,0.5)",fontSize:13,lineHeight:1.6,marginBottom:12}}>このスマホのスタンプ・景品・受取記録をすべて削除します。</div>
-        {done ? (
-          <div style={{textAlign:"center",color:"#4ade80",fontWeight:700,fontSize:14,padding:"12px",background:"rgba(74,222,128,0.1)",borderRadius:10,border:"1px solid rgba(74,222,128,0.3)"}}>✅ リセット完了。再読み込み中...</div>
-        ) : step===0 ? (
-          <button onClick={()=>setStep(1)} style={{width:"100%",padding:"12px",background:"rgba(251,191,36,0.15)",border:"1px solid rgba(251,191,36,0.4)",borderRadius:12,color:"#fbbf24",fontSize:14,fontWeight:700,cursor:"pointer"}}>リセットする</button>
+          <p style={{ color: "rgba(255,255,255,0.3)", textAlign: "center", marginTop: 30 }}>まだ景品受取なし</p>
         ) : (
-          <div style={{background:"rgba(251,191,36,0.08)",border:"1px solid rgba(251,191,36,0.3)",borderRadius:12,padding:"14px"}}>
-            <p style={{color:"#fde68a",fontSize:13,lineHeight:1.6,marginBottom:12,textAlign:"center"}}>本当にリセットしますか？この操作は取り消せません。</p>
-            <div style={{display:"flex",gap:8}}>
-              <button onClick={resetMyData} style={{flex:1,padding:"10px",background:"linear-gradient(135deg,#f59e0b,#d97706)",border:"none",borderRadius:10,color:"#000",fontWeight:700,fontSize:13,cursor:"pointer"}}>はい、リセット</button>
-              <button onClick={()=>setStep(0)} style={{flex:1,padding:"10px",background:"rgba(255,255,255,0.08)",border:"none",borderRadius:10,color:"#fff",fontSize:13,cursor:"pointer"}}>キャンセル</button>
+          [...claims].reverse().map((c, i) => (
+            <div key={i} style={styles.adminCard}>
+              <div style={styles.adminRow}>
+                <span style={{ fontSize: 28 }}>{c.prize?.icon}</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: "#fff", fontWeight: 600 }}>{c.prize?.name}</div>
+                  <div style={{ color: "rgba(255,255,255,0.4)", fontSize: 12 }}>
+                    {new Date(c.claimedAt).toLocaleString("ja-JP")}
+                  </div>
+                  <div style={{ color: "rgba(255,255,255,0.3)", fontSize: 11 }}>{c.userId}</div>
+                </div>
+                <span style={{ ...styles.stampChip, background: "#4ade80", color: "#000" }}>✓ 受取済</span>
+              </div>
             </div>
-          </div>
+          ))
         )}
-      </div>
-      <div style={{background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:12,padding:"14px",marginTop:12}}>
-        <div style={{fontWeight:700,marginBottom:6,color:"rgba(255,255,255,0.6)"}}>💡 ご注意</div>
-        <div style={{color:"rgba(255,255,255,0.4)",fontSize:12,lineHeight:1.9}}>
-          <div>• リセットされるのはこのスマホのデータだけです</div>
-          <div>• 他の来場者のデータは消えません</div>
-          <div>• 管理者画面「来場者」タブから個別削除もできます</div>
-        </div>
       </div>
     </div>
   );
@@ -2351,7 +2534,6 @@ const globalCSS = `
     from { opacity: 0; transform: translateX(-50%) translateY(-10px); }
     to { opacity: 1; transform: translateX(-50%) translateY(0); }
   }
-  @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes stampBounce {
     0%   { transform: scale(0.3) rotate(-15deg); opacity: 0; }
     40%  { transform: scale(1.18) rotate(4deg);  opacity: 1; }
@@ -2370,6 +2552,8 @@ const styleEl = document.createElement("style");
 styleEl.textContent = globalCSS;
 document.head.appendChild(styleEl);
 
+
+    // アプリをマウント
     const container = document.getElementById('root');
     const root = ReactDOM.createRoot(container);
     root.render(React.createElement(StampRallyApp));
